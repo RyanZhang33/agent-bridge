@@ -14227,6 +14227,12 @@ var CLAUDE_INSTRUCTIONS = [
   "- After sending a reply, call get_messages to check for responses.",
   "- When the user asks about Codex status or progress, call get_messages.",
   "",
+  "## Waiting for a reply",
+  "- When you send a message that expects a response, do NOT end your turn and go idle \u2014 an idle session only wakes on the next scheduled poll (up to 5 minutes later), which makes back-and-forth exchanges painfully slow.",
+  "- Instead, wait inside the turn: run `sleep 20` (Bash), then call get_messages; repeat this cycle until the reply arrives, then continue the exchange the same way.",
+  "- Give up after ~10 minutes of polling (roughly 20-30 cycles): end the turn with a one-line status. Delivery from then on is covered by the Stop hook (while you work) and the scheduled poll (while idle).",
+  "- Skip in-turn waiting when no reply is expected (final handoff, checkpoint, one-way notification).",
+  "",
   "## Turn coordination",
   "- When you see '\u23F3 Codex is working', do NOT call the reply tool \u2014 wait for '\u2705 Codex finished'.",
   "- After Codex finishes a turn, you have an attention window to review and respond before new messages arrive.",
@@ -14809,6 +14815,12 @@ var KIMI_INSTRUCTIONS = [
   "- Use the reply tool to send messages to Codex \u2014 pass chat_id back (from the chat_id line in get_messages output).",
   "- After sending a reply, call get_messages to check for responses.",
   "",
+  "## Waiting for a reply",
+  "- When you send a message that expects a response, do NOT end your turn and go idle \u2014 an idle session only wakes on the next scheduled poll (up to 5 minutes later), which makes back-and-forth exchanges painfully slow.",
+  "- Instead, wait inside the turn: run `sleep 20` (Bash), then call get_messages; repeat this cycle until the reply arrives, then continue the exchange the same way.",
+  "- Give up after ~10 minutes of polling (roughly 20-30 cycles): end the turn with a one-line status. Delivery from then on is covered by the Stop hook (while you work) and the scheduled poll (while idle).",
+  "- Skip in-turn waiting when no reply is expected (final handoff, checkpoint, one-way notification).",
+  "",
   "## Turn coordination",
   "- When you see '\u23F3 Codex is working', do NOT call the reply tool \u2014 wait for '\u2705 Codex finished' (check with get_messages).",
   '- If the reply tool returns a busy error, Codex is still executing. You decide: wait and retry later, resend with on_busy="steer" to feed the message INTO the running turn (good for mid-course corrections; it does not interrupt or restart the work), or resend with on_busy="interrupt" to STOP the running turn and start a new one with your message (use only when the current work is obsolete \u2014 prefer steer otherwise).',
@@ -14852,10 +14864,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("d435b5c", "source"),
+  commit: defineString("7cbc1f3", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("6a59cfe82153", "source")
+  codeHash: defineString("ad22680dbd81", "source")
 });
 function sameRuntimeContract(a, b) {
   if (!a || !b)
