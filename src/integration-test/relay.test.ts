@@ -188,6 +188,32 @@ describe("relay mode (frontend ↔ frontend)", () => {
     await waitFor(() => lastStatus(b1) !== undefined, "B1 still attached", 100, 50);
   }, 30000);
 
+  test("B→A messages with a constant id (chat_id) are re-stamped unique", async () => {
+    const { controlPort, stateDir, cwd } = await startRelayDaemon();
+    const a = await attachFrontend({ controlPort, stateDir, cwd, side: "a", frontend: "kimi" });
+    const b = await attachFrontend({ controlPort, stateDir, cwd, side: "b", frontend: "claude" });
+    await waitFor(() => lastStatus(b) !== undefined, "B attached", 100, 50);
+
+    // Real MCP frontends stamp their reply id with their chat_id, which is
+    // constant per session. Send two B→A messages with the SAME id: both must
+    // reach A, and with distinct re-stamped ids, or the A side's delivery
+    // dedupe suppresses everything after the first.
+    const constantId = "codex_1785827945422";
+    for (const [requestId, text] of [["req-dup-1", "first"], ["req-dup-2", "second"]] as const) {
+      b.ws.send(JSON.stringify({
+        type: "claude_to_codex",
+        requestId,
+        message: { id: constantId, source: "claude", content: text, timestamp: Date.now() },
+      }));
+    }
+    await waitFor(() => a.messages.some((m) => m.content === "second"), "A received second message", 100, 50);
+    const received = a.messages.filter((m) => m.content === "first" || m.content === "second");
+    expect(received).toHaveLength(2);
+    expect(received[0].id).not.toBe(constantId);
+    expect(received[1].id).not.toBe(constantId);
+    expect(received[0].id).not.toBe(received[1].id);
+  }, 30000);
+
   test("peer disconnect propagates: A's subsequent reply is rejected as not-ready", async () => {
     const { controlPort, stateDir, cwd } = await startRelayDaemon();
     const a = await attachFrontend({ controlPort, stateDir, cwd, side: "a", frontend: "kimi" });

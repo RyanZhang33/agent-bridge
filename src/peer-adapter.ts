@@ -54,6 +54,7 @@ export class PeerAdapter extends EventEmitter {
   private peerName = "Peer";
   private challengeInProgress = false;
   private injectionSeq = 0;
+  private incomingSeq = 0;
   private buffered: BridgeMessage[] = [];
   private readonly logger: ProcessLogger;
 
@@ -249,9 +250,18 @@ export class PeerAdapter extends EventEmitter {
    * B→A: a `claude_to_codex` arrived from the attached peer socket. Re-emit it
    * as a codex-sourced agentMessage so the daemon's existing codex-message
    * path (marker filtering / reply tracker / attention window) handles it.
+   *
+   * The id is RE-STAMPED with a unique value: MCP frontends build their reply
+   * id from their chat_id (constant per session, see ClaudeAdapter's reply
+   * tool), so forwarding the original id would make the A side's delivery
+   * dedupe suppress every message after the first.
    */
   handleIncoming(message: BridgeMessage): void {
-    this.emit("agentMessage", { ...message, source: "codex" as const });
+    this.emit("agentMessage", {
+      ...message,
+      id: `relay_msg_${Date.now()}_${++this.incomingSeq}`,
+      source: "codex" as const,
+    });
   }
 
   // ── Internals ────────────────────────────────────────────────
