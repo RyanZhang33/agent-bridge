@@ -23,6 +23,9 @@ Codex 可见文案中的对端名称按实际前端动态生成：前端在 `cla
 ### 4. 测试对齐
 `message-delivery.test.ts` 17 个用例对齐 ACK 邮箱语义（`pendingMessages`→`messageEntries`、drain 从"取出即清"变"ack 才清"）；新增 `kimi-session.test.ts`。
 
+### 5. Relay 模式：两个 MCP 前端直连（Kimi Code ↔ Claude Code）
+`AGENTBRIDGE_RELAY=1`（经 `abg kimi|claude --relay a|b` 开启）把 Codex 槽位换成第二个 MCP 前端：`src/peer-adapter.ts` 的 PeerAdapter 提供 CodexAdapter 同接口但路由到第二控制 socket；A→B 走 injectMessage，B→A 按发送方 socket 识别后走 codex 消息路径（标记过滤/reply 追踪/注意力窗口全复用）。daemon 加分流（identity.side）、预算强制禁用、relay 文案；`DaemonStatus.peerName` 按接收方个性化，前端 `setPeerName` 渲染真实对端名。无 turn 协调（steer/interrupt 惰性化，v1 设计如此）。经典 pair 零影响（relay 默认关）。测试：`src/integration-test/relay.test.ts`。与上游 v3 rooms 功能重叠已知悉并接受（v3 未合并且面向跨机多人场景）。
+
 ## 部署备忘
 
 ```bash
