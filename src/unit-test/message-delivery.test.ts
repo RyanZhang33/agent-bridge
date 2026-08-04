@@ -68,7 +68,8 @@ describe("Push-only delivery: AGENTBRIDGE_MODE is ignored", () => {
     const notifications = withMockedChannel(adapter);
     await adapter.pushNotification(makeBridgeMessage("normal push"));
     expect(notifications).toHaveLength(1);
-    expect(adapter.pendingMessages).toHaveLength(0);
+    // Always-queue: a successful push is ALSO queued for get_messages fallback.
+    expect(adapter.messageEntries).toHaveLength(1);
   });
 
   test('legacy AGENTBRIDGE_MODE="pull" still delivers via channel', async () => {
@@ -76,7 +77,7 @@ describe("Push-only delivery: AGENTBRIDGE_MODE is ignored", () => {
     const notifications = withMockedChannel(adapter);
     await adapter.pushNotification(makeBridgeMessage("ignored pull env"));
     expect(notifications).toHaveLength(1);
-    expect(adapter.pendingMessages).toHaveLength(0);
+    expect(adapter.messageEntries).toHaveLength(1);
   });
 
   test("any other AGENTBRIDGE_MODE value is equally ignored", async () => {
@@ -84,7 +85,7 @@ describe("Push-only delivery: AGENTBRIDGE_MODE is ignored", () => {
     const notifications = withMockedChannel(adapter);
     await adapter.pushNotification(makeBridgeMessage("ignored auto env"));
     expect(notifications).toHaveLength(1);
-    expect(adapter.pendingMessages).toHaveLength(0);
+    expect(adapter.messageEntries).toHaveLength(1);
   });
 
   test("legacy warning is construction-time only — never per message", async () => {
@@ -101,14 +102,15 @@ describe("Push-only delivery: AGENTBRIDGE_MODE is ignored", () => {
 });
 
 describe("Message delivery: fallback queue", () => {
-  test("queueFallbackMessage adds message to pendingMessages", () => {
+  test("queueFallbackMessage adds message to the mailbox", () => {
     const adapter = createAdapter();
 
     const msg = makeBridgeMessage("hello from codex");
     adapter.queueFallbackMessage(msg);
 
-    expect(adapter.pendingMessages).toHaveLength(1);
-    expect(adapter.pendingMessages[0].content).toBe("hello from codex");
+    expect(adapter.messageEntries).toHaveLength(1);
+    expect(adapter.messageEntries[0].message.content).toBe("hello from codex");
+    expect(adapter.messageEntries[0].acked).toBe(false);
     expect(adapter.getPendingMessageCount()).toBe(1);
   });
 
@@ -120,9 +122,9 @@ describe("Message delivery: fallback queue", () => {
     adapter.queueFallbackMessage(makeBridgeMessage("msg3"));
     adapter.queueFallbackMessage(makeBridgeMessage("msg4"));
 
-    expect(adapter.pendingMessages).toHaveLength(3);
-    expect(adapter.pendingMessages[0].content).toBe("msg2");
-    expect(adapter.pendingMessages[2].content).toBe("msg4");
+    expect(adapter.messageEntries).toHaveLength(3);
+    expect(adapter.messageEntries[0].message.content).toBe("msg2");
+    expect(adapter.messageEntries[2].message.content).toBe("msg4");
     expect(adapter.droppedMessageCount).toBe(1);
   });
 
@@ -134,7 +136,7 @@ describe("Message delivery: fallback queue", () => {
     adapter.queueFallbackMessage(makeBridgeMessage("cccc"));
     adapter.queueFallbackMessage(makeBridgeMessage("dd"));
 
-    expect(adapter.pendingMessages.map((m: any) => m.content)).toEqual(["cccc", "dd"]);
+    expect(adapter.messageEntries.map((e: any) => e.message.content)).toEqual(["cccc", "dd"]);
     expect(adapter.pendingMessageBytes).toBe(6);
     expect(adapter.droppedMessageCount).toBe(2);
   });
@@ -146,7 +148,7 @@ describe("Message delivery: fallback queue", () => {
     adapter.queueFallbackMessage(makeBridgeMessage("abc")); // 3 UTF-8 bytes
     adapter.queueFallbackMessage(makeBridgeMessage("d")); // drops the 4-byte message
 
-    expect(adapter.pendingMessages.map((m: any) => m.content)).toEqual(["abc", "d"]);
+    expect(adapter.messageEntries.map((e: any) => e.message.content)).toEqual(["abc", "d"]);
     expect(adapter.pendingMessageBytes).toBe(4);
     expect(adapter.droppedMessageCount).toBe(1);
   });
@@ -157,7 +159,7 @@ describe("Message delivery: fallback queue", () => {
     adapter.queueFallbackMessage(makeBridgeMessage("small"));
     adapter.queueFallbackMessage(makeBridgeMessage("x".repeat(9)));
 
-    expect(adapter.pendingMessages.map((m: any) => m.content)).toEqual(["small"]);
+    expect(adapter.messageEntries.map((e: any) => e.message.content)).toEqual(["small"]);
     expect(adapter.pendingMessageBytes).toBe(5);
     expect(adapter.oversizedMessageCount).toBe(1);
     expect(adapter.oversizedMessageBytes).toBe(9);
@@ -200,7 +202,9 @@ describe("Message delivery: fallback queue", () => {
 
     expect(notifications).toHaveLength(1);
     expect(notifications[0].params.content).toBe("first delivery");
-    expect(adapter.pendingMessages).toHaveLength(0);
+    // Always-queue: the first delivery sits in the mailbox; the duplicate is
+    // suppressed entirely (not queued, not pushed).
+    expect(adapter.messageEntries).toHaveLength(1);
     expect(logs.some((line) => line.includes("Duplicate Codex message suppressed") && line.includes("same-id"))).toBe(true);
   });
 
@@ -211,7 +215,7 @@ describe("Message delivery: fallback queue", () => {
     await adapter.pushNotification(makeBridgeMessage("queued once", 1705312200000, "fallback-id"));
     await adapter.pushNotification(makeBridgeMessage("queued duplicate", 1705312201000, "fallback-id"));
 
-    expect(adapter.pendingMessages.map((m: any) => m.content)).toEqual(["queued once"]);
+    expect(adapter.messageEntries.map((e: any) => e.message.content)).toEqual(["queued once"]);
     expect(adapter.pendingMessageBytes).toBe(Buffer.byteLength("queued once", "utf8"));
   });
 
@@ -275,8 +279,8 @@ describe("Message delivery: fallback queue", () => {
 
     await adapter.pushNotification(makeBridgeMessage("fallback msg"));
 
-    expect(adapter.pendingMessages).toHaveLength(1);
-    expect(adapter.pendingMessages[0].content).toBe("fallback msg");
+    expect(adapter.messageEntries).toHaveLength(1);
+    expect(adapter.messageEntries[0].message.content).toBe("fallback msg");
   });
 
   test("push recovery does not auto-replay fallback backlog or duplicate messages", async () => {
@@ -289,7 +293,12 @@ describe("Message delivery: fallback queue", () => {
 
     expect(notifications).toHaveLength(1);
     expect(notifications[0].params.content).toBe("live after recovery");
-    expect(adapter.pendingMessages.map((m: any) => m.content)).toEqual(["queued while push failed"]);
+    // Always-queue: BOTH messages sit in the mailbox (the recovered push is
+    // queued too), and nothing was replayed through the channel.
+    expect(adapter.messageEntries.map((e: any) => e.message.content)).toEqual([
+      "queued while push failed",
+      "live after recovery",
+    ]);
   });
 });
 
@@ -301,7 +310,7 @@ describe("Message delivery: drainMessages (get_messages)", () => {
     expect(result.content[0].text).toBe("No new messages from Codex.");
   });
 
-  test("returns formatted messages and clears queue", () => {
+  test("returns formatted messages and clears the mailbox on ack", () => {
     const adapter = createAdapter();
 
     const ts = 1705312200000; // fixed timestamp for deterministic output
@@ -311,15 +320,19 @@ describe("Message delivery: drainMessages (get_messages)", () => {
     const result = adapter.drainMessages();
     const text = result.content[0].text;
 
-    expect(text).toContain("[2 new messages from Codex]");
+    expect(text).toContain("[2 un-acked messages from Codex]");
     expect(text).toContain("chat_id:");
     expect(text).toContain("[1]");
     expect(text).toContain("first message");
     expect(text).toContain("[2]");
     expect(text).toContain("second message");
+    expect(text).toContain("ack_ids");
 
-    // Queue should be cleared
-    expect(adapter.pendingMessages).toHaveLength(0);
+    // ACK mailbox: drain without ack_ids keeps the messages…
+    expect(adapter.getPendingMessageCount()).toBe(2);
+    // …explicit acknowledgment removes them.
+    adapter.drainMessages(adapter.messageEntries.map((e: any) => e.message.id));
+    expect(adapter.messageEntries).toHaveLength(0);
     expect(adapter.getPendingMessageCount()).toBe(0);
   });
 
@@ -347,14 +360,15 @@ describe("Message delivery: drainMessages (get_messages)", () => {
     const result = adapter.drainMessages();
     const text = result.content[0].text;
 
-    expect(text).toContain("[1 new message from Codex]");
+    expect(text).toContain("[1 un-acked message from Codex]");
     expect(text).toContain("1 older message");
     expect(text).toContain("dropped due to fallback queue overflow");
     expect(text).toContain("1 oversized message from Codex omitted (>10B)");
     expect(text).not.toContain("12345");
     expect(text).not.toContain("xxxxxxxxxxx");
-    expect(adapter.pendingMessages).toHaveLength(0);
-    expect(adapter.pendingMessageBytes).toBe(0);
+    // The surviving entry stays in the mailbox until acked; counters reset.
+    expect(adapter.messageEntries).toHaveLength(1);
+    expect(adapter.pendingMessageBytes).toBe(6);
     expect(adapter.droppedMessageCount).toBe(0);
     expect(adapter.oversizedMessageCount).toBe(0);
   });
@@ -378,7 +392,8 @@ describe("Message delivery: drainMessages (get_messages)", () => {
     adapter.queueFallbackMessage(makeBridgeMessage("first"));
     adapter.queueFallbackMessage(makeBridgeMessage("second"));
 
-    const firstDrain = adapter.drainMessages();
+    // Ack everything in the first drain so the mailbox is actually cleared.
+    const firstDrain = adapter.drainMessages(adapter.messageEntries.map((e: any) => e.message.id));
     expect(firstDrain.content[0].text).toContain("dropped due to fallback queue overflow");
 
     const secondDrain = adapter.drainMessages();
@@ -391,7 +406,7 @@ describe("Message delivery: drainMessages (get_messages)", () => {
     adapter.queueFallbackMessage(makeBridgeMessage("only one"));
 
     const result = adapter.drainMessages();
-    expect(result.content[0].text).toContain("[1 new message from Codex]");
+    expect(result.content[0].text).toContain("[1 un-acked message from Codex]");
   });
 });
 
@@ -427,7 +442,7 @@ describe("Message delivery: reply pending hint", () => {
     const result = await adapter.handleReply({ text: "hello codex" });
 
     expect(result.isError).toBe(true);
-    expect(adapter.pendingMessages).toHaveLength(0);
+    expect(adapter.messageEntries).toHaveLength(0);
     expect(adapter.getPendingMessageCount()).toBe(0);
   });
 
