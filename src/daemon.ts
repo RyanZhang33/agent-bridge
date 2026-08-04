@@ -10,7 +10,7 @@ import { portFromUrl, type DaemonRecord } from "./daemon-record";
 import { CodexAdapter } from "./codex-adapter";
 import { validateClaudeClientIdentity, evaluateInjectionAttachGuard } from "./daemon-identity";
 import {
-  REPLY_REQUIRED_INSTRUCTION,
+  replyRequiredInstruction,
   StatusBuffer,
   routeCodexMessage,
   type FilterMode,
@@ -156,6 +156,17 @@ let controlServer: ReturnType<typeof Bun.serve> | null = null;
 // the live incumbent's identity files survive (HIGH-1a).
 let boundControlPort = false;
 let attachedClaude: ServerWebSocket<ControlSocketData> | null = null;
+/**
+ * Display name of the attached frontend ("Claude" | "Kimi"), resolved at
+ * attach from the identity's `frontend` field and used to name the peer in
+ * Codex-facing text (reply-required wrapper, steer prefix). Defaults to
+ * "Claude" so older frontends that report nothing behave exactly as before.
+ */
+let attachedFrontendName = "Claude";
+/** Normalize the identity's frontend kind to a display name. */
+function frontendDisplayName(raw?: string | null): string {
+  return raw?.toLowerCase() === "kimi" ? "Kimi" : "Claude";
+}
 let nextControlClientId = 0;
 let nextSystemMessageId = 0;
 // Per-PROCESS salt for systemMessage ids (HIGH-2). The counter resets to 0 on
@@ -1457,7 +1468,7 @@ async function handleClaudeToCodex(
   // Only the DYNAMIC reply-required instruction is appended, on demand.
   let contentToSend = message.message.content;
   if (requireReply) {
-    contentToSend += REPLY_REQUIRED_INSTRUCTION;
+    contentToSend += replyRequiredInstruction(attachedFrontendName);
   }
   log(`Forwarding Claude → Codex (${message.message.content.length} chars, requireReply=${requireReply})`);
   // Budget tier overrides (P4/R5) piggyback on this user-initiated turn —
@@ -1477,7 +1488,7 @@ async function handleClaudeToCodex(
     // the app-server ACCEPTS the steer (steerAccepted handler), so any new
     // forwarded agentMessage before the turn's terminal counts as the reply.
     const steerContent =
-      "[STEER from the other agent]\n" +
+      `[STEER from ${attachedFrontendName}]\n` +
       "Mid-turn update for the current Codex turn. Integrate if relevant; do not restart work unless explicitly requested.\n\n" +
       contentToSend;
     // Read the steer target BEFORE dispatch so an idempotency key can be
@@ -1795,6 +1806,7 @@ async function attachClaude(ws: ServerWebSocket<ControlSocketData>, identity?: C
   clearPendingClaudeDisconnect("Claude frontend attached");
   ws.data.identity = identity;
   attachedClaude = ws;
+  attachedFrontendName = frontendDisplayName(identity?.frontend);
   ws.data.attached = true;
   cancelIdleShutdown();
   log(
@@ -1830,6 +1842,7 @@ function detachClaude(ws: ServerWebSocket<ControlSocketData>, reason: string) {
   if (attachedClaude !== ws) return;
 
   attachedClaude = null;
+  attachedFrontendName = "Claude";
   ws.data.attached = false;
   log(`Claude frontend detached (#${ws.data.clientId}, ${reason})`);
 

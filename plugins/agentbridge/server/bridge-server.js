@@ -14788,10 +14788,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("058069c", "source"),
+  commit: defineString("c5a3a4e", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("2e0369934e52", "source")
+  codeHash: defineString("57bd1f650894", "source")
 });
 function sameRuntimeContract(a, b) {
   if (!a || !b)
@@ -16968,6 +16968,7 @@ function currentClientIdentity() {
     stateDir: stateDir.dir,
     clientPid: process.pid,
     contractVersion: BUILD_INFO.contractVersion,
+    frontend: FRONTEND_KIND,
     ...controlToken ? { controlToken } : {}
   };
 }

@@ -655,6 +655,9 @@ function currentClientIdentity(): ControlClientIdentity {
     stateDir: stateDir.dir,
     clientPid: process.pid,
     contractVersion: BUILD_INFO.contractVersion,
+    // Report which frontend this is ("claude" | "kimi") so the daemon can name
+    // the peer correctly in Codex-facing text.
+    frontend: FRONTEND_KIND,
     ...(controlToken ? { controlToken } : {}),
   };
 }

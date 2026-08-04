@@ -19,6 +19,12 @@ export interface ControlClientIdentity {
    * when the daemon has no token loaded (compat-degraded).
    */
   controlToken?: string | null;
+  /**
+   * Frontend kind reported at attach (e.g. "claude" | "kimi"). The daemon uses
+   * it to name the peer correctly in Codex-facing text (REPLY REQUIRED
+   * wrapper, steer prefix). Absent on older frontends → treated as "claude".
+   */
+  frontend?: string;
 }
 
 /**

@@ -41,7 +41,7 @@ interface Harness {
   statusMessages: ControlServerMessage[];
   close: () => Promise<void>;
   sendAppCommand: (command: string) => void;
-  attachClaude: () => Promise<void>;
+  attachClaude: (frontend?: string) => Promise<void>;
   /** Control socket from attachClaude (for sending claude_to_codex etc.). */
   controlWs: WebSocket | null;
   /** Connect a fake Codex TUI to the proxy and complete the thread/start handshake. */
@@ -1313,7 +1313,7 @@ describe("daemon wiring", () => {
       expect(typeof rejected.retryAfterMs).toBe("number");
 
       // The steer path: message reaches the app-server as turn/steer with the
-      // explicit [STEER from the other agent] framing, on the live thread.
+      // explicit [STEER from Claude] framing, on the live thread.
       harness.sendClaudeToCodex("req-steer-1", "course correction: use approach B", { onBusy: "steer" });
       const accepted = await waitForResult("req-steer-1");
       expect(accepted.success).toBe(true);
@@ -1327,7 +1327,7 @@ describe("daemon wiring", () => {
       // — it would surface later as an async system_steer_failed.
       expect(steer.expectedTurnId).toBe("turn-1");
       expect(steer.input[0]!.type).toBe("text");
-      expect(steer.input[0]!.text.startsWith("[STEER from the other agent]\n")).toBe(true);
+      expect(steer.input[0]!.text.startsWith("[STEER from Claude]\n")).toBe(true);
       expect(steer.input[0]!.text).toContain("course correction: use approach B");
 
       // An app-server rejection after transport-accept surfaces as
@@ -1364,6 +1364,46 @@ describe("daemon wiring", () => {
       );
       expect(replyMissing.content).toContain("require_reply");
       expect(harness.messages.some((m) => m.id.startsWith("system_turn_completed"))).toBe(true);
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  }, 60000);
+
+  test("frontend naming: a kimi-attached frontend is named Kimi in Codex-facing text", async () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "agentbridge-kimi-name-fixture-"));
+    const steerLog = join(fixtureRoot, "turnsteer.jsonl");
+    const readSteers = (): Array<{ threadId: string; expectedTurnId?: string; input: Array<{ type: string; text: string }> }> =>
+      existsSync(steerLog)
+        ? readFileSync(steerLog, "utf-8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+        : [];
+
+    const harness = await startHarness({
+      pairId: "main-kiminmabcd",
+      pairName: "main",
+      extraEnv: { FAKE_APP_TURNSTEER_LOG: steerLog },
+    });
+
+    try {
+      // Attach AS KIMI: the identity's frontend field drives the display name.
+      await harness.attachClaude("kimi");
+      await harness.connectTui();
+
+      // Steer path: prefix must name Kimi, not Claude.
+      harness.sendAppCommand("start-turn");
+      await waitForMessage(
+        harness.messages,
+        (message) => message.id.startsWith("system_turn_started"),
+        "system_turn_started",
+      );
+      harness.sendClaudeToCodex("req-kimi-1", "kimi steer", { onBusy: "steer" });
+      await waitFor(() => readSteers().length >= 1, "recorded kimi steer", 100, 100);
+      expect(readSteers()[0]!.input[0]!.text.startsWith("[STEER from Kimi]\n")).toBe(true);
+
+      // require_reply wrapper must name Kimi too.
+      harness.sendClaudeToCodex("req-kimi-2", "kimi rr", { onBusy: "steer", requireReply: true });
+      await waitFor(() => readSteers().length >= 2, "recorded kimi require_reply steer", 100, 100);
+      expect(readSteers()[1]!.input[0]!.text).toContain("Kimi has explicitly requested a reply");
+      expect(readSteers()[1]!.input[0]!.text).not.toContain("Claude has explicitly requested");
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }
@@ -1425,7 +1465,7 @@ describe("daemon wiring", () => {
       expect(injected.threadId).toBe("thread-fake-1");
       expect(injected.input[0].type).toBe("text");
       expect(injected.input[0].text).toContain("drop everything: new priority task");
-      expect(injected.input[0].text).not.toContain("[STEER from the other agent]");
+      expect(injected.input[0].text).not.toContain("[STEER from Claude]");
 
       // turn_started control event correlates requestId + idempotencyKey.
       await waitFor(
@@ -2061,7 +2101,7 @@ async function startHarness(opts: {
     sendAppCommand: (command: string) => {
       writeFileSync(commandFile, `${command}\n`, "utf-8");
     },
-    attachClaude: async () => {
+    attachClaude: async (frontend?: string) => {
       const ws = await connectControlSocket(controlPort);
       harness.controlWs = ws;
       ws.onmessage = (event) => {
@@ -2087,6 +2127,7 @@ async function startHarness(opts: {
           // Mirror bridge.ts: echo the daemon's contract version (#303). Read from
           // the single source so a future bump keeps the happy path green.
           contractVersion: CONTRACT_VERSION,
+          ...(frontend ? { frontend } : {}),
           ...(controlToken ? { controlToken } : {}),
         },
       }));

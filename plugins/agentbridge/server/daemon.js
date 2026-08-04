@@ -30,10 +30,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("058069c", "source"),
+  commit: defineString("c5a3a4e", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("2e0369934e52", "source")
+  codeHash: defineString("57bd1f650894", "source")
 });
 function daemonStatusBuildInfo() {
   return { ...BUILD_INFO };
@@ -2728,9 +2728,12 @@ function routeCodexMessage(content, ctx) {
     reason: result.action
   };
 }
-var REPLY_REQUIRED_INSTRUCTION = `
+function replyRequiredInstruction(peerName) {
+  return `
 
-[\u26A0\uFE0F REPLY REQUIRED] The other agent has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement \u2014 do not skip or use [STATUS]/[FYI] markers for this reply.`;
+[\u26A0\uFE0F REPLY REQUIRED] ${peerName} has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement \u2014 do not skip or use [STATUS]/[FYI] markers for this reply.`;
+}
+
 class StatusBuffer {
   onFlush;
   buffer = [];
@@ -6624,6 +6627,10 @@ var attachCmd = `codex --enable tui_app_server --remote ${codex.proxyUrl}`;
 var controlServer = null;
 var boundControlPort = false;
 var attachedClaude = null;
+var attachedFrontendName = "Claude";
+function frontendDisplayName(raw) {
+  return raw?.toLowerCase() === "kimi" ? "Kimi" : "Claude";
+}
 var nextControlClientId = 0;
 var nextSystemMessageId = 0;
 var SYSTEM_MSG_SALT = randomUUID4().slice(0, 8);
@@ -7377,12 +7384,12 @@ async function handleClaudeToCodex(ws, message) {
   const requireReply = !!message.requireReply;
   let contentToSend = message.message.content;
   if (requireReply) {
-    contentToSend += REPLY_REQUIRED_INSTRUCTION;
+    contentToSend += replyRequiredInstruction(attachedFrontendName);
   }
   log(`Forwarding Claude \u2192 Codex (${message.message.content.length} chars, requireReply=${requireReply})`);
   const tierOverrides = BUDGET_CONFIG.codexTierControl ? budgetCoordinator?.getCodexTurnOverrides() ?? undefined : undefined;
   if (codex.turnInProgress && message.onBusy === "steer") {
-    const steerContent = `[STEER from the other agent]
+    const steerContent = `[STEER from ${attachedFrontendName}]
 ` + `Mid-turn update for the current Codex turn. Integrate if relevant; do not restart work unless explicitly requested.
 
 ` + contentToSend;
@@ -7566,6 +7573,7 @@ async function attachClaude(ws, identity) {
   clearPendingClaudeDisconnect("Claude frontend attached");
   ws.data.identity = identity;
   attachedClaude = ws;
+  attachedFrontendName = frontendDisplayName(identity?.frontend);
   ws.data.attached = true;
   cancelIdleShutdown();
   log(`Claude frontend attached (#${ws.data.clientId}, pair=${identity?.pairId ?? "<none>"}, cwd=${identity?.cwd ?? "<unknown>"})`);
@@ -7590,6 +7598,7 @@ function detachClaude(ws, reason) {
   if (attachedClaude !== ws)
     return;
   attachedClaude = null;
+  attachedFrontendName = "Claude";
   ws.data.attached = false;
   log(`Claude frontend detached (#${ws.data.clientId}, ${reason})`);
   if (ws.data.pendingBackpressure.length > 0) {
