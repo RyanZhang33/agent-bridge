@@ -26,6 +26,10 @@ Codex 可见文案中的对端名称按实际前端动态生成：前端在 `cla
 ### 5. Relay 模式：两个 MCP 前端直连（Kimi Code ↔ Claude Code）
 `AGENTBRIDGE_RELAY=1`（经 `abg kimi|claude --relay a|b` 开启）把 Codex 槽位换成第二个 MCP 前端：`src/peer-adapter.ts` 的 PeerAdapter 提供 CodexAdapter 同接口但路由到第二控制 socket；A→B 走 injectMessage，B→A 按发送方 socket 识别后走 codex 消息路径（标记过滤/reply 追踪/注意力窗口全复用）。daemon 加分流（identity.side）、预算强制禁用、relay 文案；`DaemonStatus.peerName` 按接收方个性化，前端 `setPeerName` 渲染真实对端名。无 turn 协调（steer/interrupt 惰性化，v1 设计如此）。经典 pair 零影响（relay 默认关）。测试：`src/integration-test/relay.test.ts`。与上游 v3 rooms 功能重叠已知悉并接受（v3 未合并且面向跨机多人场景）。
 
+### 6. Stop hook 唤醒（拉模式前端的 turn 边界接续）
+MCP 前端无法被 daemon 推送唤醒（CC channel 自 v2.1.220 失效、Kimi 本无），空闲时对端消息只能躺在邮箱。解法：claude-adapter 在每次入队/取出时把邮箱状态写到 `<stateDir>/mailbox-pending-<frontend>.json`（relay 双前端共享 state dir 所以按 frontend 分文件）；Stop hook 脚本 `plugins/agentbridge/hooks/check-mailbox.cjs`（CC 经插件 hooks.json、Kimi 经 `~/.kimi-code/config.toml` 的 `[[hooks]]` 注册）在 turn 结束时检查，非空则 exit 2 阻塞 Stop 并提示模型调 get_messages + ack——两 host 对 exit 2+stderr 语义一致。防死循环：每个 latestAt 最多提醒 2 次，新消息（新 latestAt）重新武装。覆盖"turn 期间来消息"场景；纯 idle 唤醒仍靠会话 cron 轮询。
+`AGENTBRIDGE_RELAY=1`（经 `abg kimi|claude --relay a|b` 开启）把 Codex 槽位换成第二个 MCP 前端：`src/peer-adapter.ts` 的 PeerAdapter 提供 CodexAdapter 同接口但路由到第二控制 socket；A→B 走 injectMessage，B→A 按发送方 socket 识别后走 codex 消息路径（标记过滤/reply 追踪/注意力窗口全复用）。daemon 加分流（identity.side）、预算强制禁用、relay 文案；`DaemonStatus.peerName` 按接收方个性化，前端 `setPeerName` 渲染真实对端名。无 turn 协调（steer/interrupt 惰性化，v1 设计如此）。经典 pair 零影响（relay 默认关）。测试：`src/integration-test/relay.test.ts`。与上游 v3 rooms 功能重叠已知悉并接受（v3 未合并且面向跨机多人场景）。
+
 ## 部署备忘
 
 ```bash
