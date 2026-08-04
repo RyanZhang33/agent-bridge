@@ -14225,6 +14225,7 @@ class ClaudeAdapter extends EventEmitter {
   deliveredMessageIds = new Map;
   channelPushEnabled;
   budgetSnapshot = null;
+  peerName = "Codex";
   budgetFreshTtlMs;
   wallNow;
   requestFreshSnapshot = null;
@@ -14274,6 +14275,10 @@ class ClaudeAdapter extends EventEmitter {
   }
   setBudgetSnapshot(snapshot) {
     this.budgetSnapshot = snapshot;
+  }
+  setPeerName(name) {
+    if (name)
+      this.peerName = name;
   }
   setRequestFreshSnapshot(fetcher) {
     this.requestFreshSnapshot = fetcher;
@@ -14400,7 +14405,7 @@ class ClaudeAdapter extends EventEmitter {
     this.oversizedMessageBytes = 0;
     if (count === 0 && dropped === 0 && oversized === 0) {
       return {
-        content: [{ type: "text", text: "No new messages from Codex." }]
+        content: [{ type: "text", text: `No new messages from ${this.peerName}.` }]
       };
     }
     const notices = [];
@@ -14409,14 +14414,14 @@ class ClaudeAdapter extends EventEmitter {
     }
     if (oversized > 0) {
       for (const [source, sourceCount] of Object.entries(oversizedSourceCounts)) {
-        notices.push(`${sourceCount} oversized message${sourceCount === 1 ? "" : "s"} ` + `from ${formatSource(source)} omitted ` + `(>${formatBytes(this.maxBufferedBytes)})`);
+        notices.push(`${sourceCount} oversized message${sourceCount === 1 ? "" : "s"} ` + `from ${this.displaySource(source)} omitted ` + `(>${formatBytes(this.maxBufferedBytes)})`);
       }
     }
     const formatted = unacked.map((entry, i) => {
       const ts = new Date(entry.message.timestamp).toISOString();
       return `---
 [${i + 1}] ${ts} [id: ${entry.message.id}]
-Codex: ${entry.message.content}`;
+${this.peerName}: ${entry.message.content}`;
     }).join(`
 
 `);
@@ -14424,7 +14429,7 @@ Codex: ${entry.message.content}`;
 `);
     const parts2 = [];
     if (count > 0) {
-      parts2.push(`[${count} un-acked message${count > 1 ? "s" : ""} from Codex]
+      parts2.push(`[${count} un-acked message${count > 1 ? "s" : ""} from ${this.peerName}]
 chat_id: ${this.sessionId}`);
     }
     if (noticeText)
@@ -14679,18 +14684,21 @@ chat_id: ${this.sessionId}`);
       };
     }
     const pending = this.messageEntries.filter((e) => !e.acked).length;
-    let responseText = "Reply sent to Codex.";
+    let responseText = `Reply sent to ${this.peerName}.`;
     if (onBusy === "steer") {
-      responseText = "Reply sent to Codex (will be steered into the running turn if one is active; watch for a system_steer_failed notice if the app-server rejects it).";
+      responseText = `Reply sent to ${this.peerName} (will be steered into the running turn if one is active; watch for a system_steer_failed notice if the app-server rejects it).`;
     } else if (onBusy === "interrupt") {
       responseText = "Reply sent to Codex as a new turn (any turn still running was interrupted first; if it had already finished, your message was simply injected).";
     }
     if (pending > 0) {
-      responseText += ` Note: ${pending} unread Codex message${pending > 1 ? "s" : ""} already waiting \u2014 call get_messages to read them.`;
+      responseText += ` Note: ${pending} unread ${this.peerName} message${pending > 1 ? "s" : ""} already waiting \u2014 call get_messages to read them.`;
     }
     return {
       content: [{ type: "text", text: responseText }]
     };
+  }
+  displaySource(source) {
+    return source === "codex" ? this.peerName : "Claude";
   }
   log(msg) {
     this.logger.log(msg);
@@ -14704,9 +14712,6 @@ function positiveIntegerOr(value, fallback) {
 }
 function utf8ByteLength(value) {
   return Buffer.byteLength(value, "utf8");
-}
-function formatSource(source) {
-  return source === "codex" ? "Codex" : "Claude";
 }
 function formatBytes(bytes) {
   if (bytes < 1024)
@@ -14761,7 +14766,7 @@ class KimiAdapter extends ClaudeAdapter {
     super(logFile, {
       ...options,
       channelPush: false,
-      instructions: KIMI_INSTRUCTIONS
+      instructions: options.instructions ?? KIMI_INSTRUCTIONS
     });
   }
 }
@@ -14788,10 +14793,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("c5a3a4e", "source"),
+  commit: defineString("2876967", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("57bd1f650894", "source")
+  codeHash: defineString("b671a13fea4a", "source")
 });
 function sameRuntimeContract(a, b) {
   if (!a || !b)
@@ -16577,12 +16582,29 @@ if (FRONTEND_KIND === "kimi" && !process.env.AGENTBRIDGE_PAIR_ID && !process.env
 }
 var daemonLifecycle = new DaemonLifecycle({ stateDir, controlPort: CONTROL_PORT, log });
 var CONTROL_WS_URL = daemonLifecycle.controlWsUrl;
+var RELAY_MODE = process.env.AGENTBRIDGE_RELAY === "1";
+var RELAY_INSTRUCTIONS = [
+  "You are connected to another AI coding agent (the peer) via AgentBridge in relay mode (frontend \u2194 frontend, no Codex).",
+  "",
+  "## Message delivery",
+  "Messages from the peer are NOT pushed in real time \u2014 they are stored in the AgentBridge mailbox. Call get_messages proactively: after every reply you send, before you end your turn, and whenever the user asks about the peer.",
+  "Messages stay in the mailbox until acknowledged \u2014 pass ack_ids (from the [id: ...] labels) to confirm receipt and remove them.",
+  "",
+  "## How to interact",
+  "- Use the reply tool to send messages to the peer.",
+  "- Start high-priority messages with the [IMPORTANT] marker so they are forwarded immediately; use [STATUS] for progress updates and [FYI] for background context.",
+  "- After sending a reply, call get_messages to check for responses.",
+  "",
+  "## Collaboration language",
+  '- Use explicit phrases such as "My independent view is:", "I agree on:", "I disagree on:", and "Current consensus:".'
+].join(`
+`);
 var effectiveBudget = applyBudgetEnvOverrides(config2.budget);
-var claude = FRONTEND_KIND === "kimi" ? new KimiAdapter(stateDir.logFile, {
-  budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000
-}) : new ClaudeAdapter(stateDir.logFile, {
-  budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000
-});
+var adapterOptions = {
+  budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000,
+  ...RELAY_MODE ? { instructions: RELAY_INSTRUCTIONS } : {}
+};
+var claude = FRONTEND_KIND === "kimi" ? new KimiAdapter(stateDir.logFile, adapterOptions) : new ClaudeAdapter(stateDir.logFile, adapterOptions);
 var daemonClient = new DaemonClient(CONTROL_WS_URL, { identity: currentClientIdentity });
 claude.setRequestFreshSnapshot(() => daemonClient.requestBudgetRefresh());
 var shuttingDown = false;
@@ -16654,13 +16676,15 @@ daemonClient.on("codexMessage", (message) => {
 daemonClient.on("status", (status) => {
   log(`Daemon status: ready=${status.bridgeReady} tui=${status.tuiConnected} thread=${status.threadId ?? "none"} queued=${status.queuedMessageCount}`);
   claude.setBudgetSnapshot(status.budget ?? null);
+  claude.setPeerName(status.peerName);
   if (!hasSeenTuiConnect && status.tuiConnected && !previousTuiConnected) {
     hasSeenTuiConnect = true;
+    const peerName = status.peerName ?? "Codex";
     log("First TUI connect detected \u2014 sending kickoff message to Claude");
     claude.pushNotification(systemMessage("system_tui_kickoff", [
-      "\uD83E\uDD1D Codex has connected via AgentBridge.",
+      `\uD83E\uDD1D ${peerName} has connected via AgentBridge.`,
       "You are now in a multi-agent collaboration session.",
-      "When you receive a complex task, propose a division of labor to Codex.",
+      `When you receive a complex task, propose a division of labor to ${peerName}.`,
       "Use `reply` to send messages and `get_messages` to check for responses."
     ].join(`
 `)));
@@ -16969,6 +16993,7 @@ function currentClientIdentity() {
     clientPid: process.pid,
     contractVersion: BUILD_INFO.contractVersion,
     frontend: FRONTEND_KIND,
+    ...process.env.AGENTBRIDGE_RELAY_SIDE === "a" || process.env.AGENTBRIDGE_RELAY_SIDE === "b" ? { side: process.env.AGENTBRIDGE_RELAY_SIDE } : {},
     ...controlToken ? { controlToken } : {}
   };
 }

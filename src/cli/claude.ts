@@ -19,6 +19,7 @@ import {
   CLAUDE_MAX_PERMISSION_FLAG,
   planMaxPermissions,
 } from "./max-permissions";
+import { parseRelayFlag, applyRelayEnv } from "./relay-flag";
 
 /** Flags that AgentBridge owns and will inject automatically. */
 const OWNED_FLAGS = ["--channels", "--dangerously-load-development-channels"];
@@ -36,10 +37,16 @@ export async function runClaude(args: string[]) {
   // Strip `--pair <name>` before anything else; the rest flows through to claude.
   const { pairFlag, rest: pairRest } = parsePairFlag(args);
 
+  // Strip wrapper-owned `--relay a|b` and export the relay env BEFORE pair
+  // resolution, so the daemon (spawned below) and the plugin bridge-server
+  // (spawned by claude) both inherit it.
+  const { relaySide, rest: relayRest } = parseRelayFlag(pairRest);
+  if (relaySide) applyRelayEnv(relaySide);
+
   // Max-permission default (user request): `abg claude` runs Claude Code with
   // --dangerously-skip-permissions unless --safe / AGENTBRIDGE_SAFE=1 / the
   // user already passed it. `--safe` is wrapper-owned and stripped here.
-  const permissionPlan = planMaxPermissions(pairRest, CLAUDE_MAX_PERMISSION_SUPPRESSORS);
+  const permissionPlan = planMaxPermissions(relayRest, CLAUDE_MAX_PERMISSION_SUPPRESSORS);
   const rest = permissionPlan.args;
 
   // Check for owned flag conflicts (on the real claude args, not the pair flag).

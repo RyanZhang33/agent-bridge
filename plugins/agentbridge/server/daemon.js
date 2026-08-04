@@ -30,10 +30,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("c5a3a4e", "source"),
+  commit: defineString("2876967", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("57bd1f650894", "source")
+  codeHash: defineString("b671a13fea4a", "source")
 });
 function daemonStatusBuildInfo() {
   return { ...BUILD_INFO };
@@ -2554,6 +2554,9 @@ class CodexAdapter extends EventEmitter {
   }
 }
 
+// src/peer-adapter.ts
+import { EventEmitter as EventEmitter2 } from "events";
+
 // src/control-protocol.ts
 var CLOSE_CODE_REPLACED = 4001;
 var CLOSE_CODE_EVICTED_STALE = 4002;
@@ -2561,6 +2564,215 @@ var CLOSE_CODE_PROBE_IN_PROGRESS = 4003;
 var CLOSE_CODE_PAIR_MISMATCH = 4004;
 var CLOSE_CODE_TOKEN_MISMATCH = 4005;
 var CLOSE_CODE_CONTRACT_MISMATCH = 4006;
+
+// src/liveness-probe.ts
+var OPEN = 1;
+async function probeLiveness(target, options) {
+  const {
+    timeoutMs,
+    pollMs = 50,
+    now = Date.now,
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  } = options;
+  if (target.readyState !== OPEN)
+    return false;
+  const baseline = target.pongCount;
+  try {
+    target.ping();
+  } catch {
+    return false;
+  }
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (target.pongCount > baseline)
+      return true;
+    if (target.readyState !== OPEN)
+      return false;
+    await sleep(pollMs);
+  }
+  return target.pongCount > baseline;
+}
+
+// src/peer-adapter.ts
+var MAX_BUFFERED_RELAY_MESSAGES = 100;
+
+class PeerAdapter extends EventEmitter2 {
+  peer = null;
+  peerName = "Peer";
+  challengeInProgress = false;
+  injectionSeq = 0;
+  buffered = [];
+  logger;
+  constructor(logFile) {
+    super();
+    this.logger = createProcessLogger({ component: "PeerAdapter", logFile });
+  }
+  proxyUrl = "relay://peer-b";
+  appServerUrl = "relay://peer-b";
+  get appServerInfo() {
+    return null;
+  }
+  get capturedAppServerInfo() {
+    return null;
+  }
+  get turnInProgress() {
+    return false;
+  }
+  get turnPhase() {
+    return "idle";
+  }
+  get steerableTurnId() {
+    return null;
+  }
+  get activeThreadId() {
+    return this.peer ? "relay-peer" : null;
+  }
+  get peerDisplayName() {
+    return this.peerName;
+  }
+  get attachedSocket() {
+    return this.peer;
+  }
+  isAttachedSocket(ws) {
+    return this.peer !== null && this.peer === ws;
+  }
+  async start() {
+    this.log("started (relay mode \u2014 waiting for peer frontend to attach)");
+  }
+  async stop() {
+    if (this.peer) {
+      try {
+        this.peer.close(1001, "daemon shutting down");
+      } catch {}
+    }
+  }
+  forceKillAppServerSync() {}
+  canInject() {
+    return this.peer !== null && this.peer.readyState === WebSocket.OPEN;
+  }
+  injectMessage(content, _overrides) {
+    if (!this.canInject())
+      return null;
+    const injectionId = ++this.injectionSeq;
+    const msg = {
+      id: `relay_inject_${injectionId}`,
+      source: "claude",
+      content,
+      timestamp: Date.now()
+    };
+    if (!this.sendToPeer(msg))
+      return null;
+    queueMicrotask(() => this.emit("bridgeTurnStarted", { requestId: injectionId, turnId: "relay-turn" }));
+    return injectionId;
+  }
+  steerMessage(_text) {
+    return null;
+  }
+  interruptActiveTurns() {
+    return { ok: true, turnIds: [] };
+  }
+  waitForTurnsTerminal(_turnIds, _timeoutMs, _signal) {
+    return Promise.resolve({ ok: true });
+  }
+  async attach(ws, identity, probeTimeoutMs) {
+    const incumbent = this.peer;
+    if (incumbent && incumbent !== ws && incumbent.readyState !== WebSocket.CLOSED) {
+      if (this.challengeInProgress) {
+        ws.close(CLOSE_CODE_REPLACED, "peer liveness probe in progress, retry shortly");
+        return;
+      }
+      this.challengeInProgress = true;
+      let alive = false;
+      try {
+        alive = await probeLiveness({
+          get readyState() {
+            return incumbent.readyState;
+          },
+          get pongCount() {
+            return incumbent.data.pongCount;
+          },
+          ping: () => {
+            incumbent.ping();
+          }
+        }, { timeoutMs: probeTimeoutMs });
+      } finally {
+        this.challengeInProgress = false;
+      }
+      if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING)
+        return;
+      if (alive) {
+        this.log(`Rejecting peer attach #${ws.data.clientId} \u2014 incumbent #${incumbent.data.clientId} is alive`);
+        ws.close(CLOSE_CODE_REPLACED, "another peer session is already connected");
+        return;
+      }
+      this.detach(incumbent, "evicted: liveness probe failed");
+      try {
+        incumbent.close(CLOSE_CODE_REPLACED, "stale peer evicted by newer session");
+      } catch {}
+    }
+    this.peer = ws;
+    ws.data.attached = true;
+    const frontend = identity?.frontend?.toLowerCase();
+    this.peerName = frontend === "kimi" ? "Kimi" : frontend === "claude" ? "Claude" : "Peer";
+    this.log(`Peer attached (#${ws.data.clientId}, frontend=${this.peerName})`);
+    this.emit("tuiConnected", ws.data.clientId);
+    this.emit("ready", "relay-peer");
+    if (this.buffered.length > 0) {
+      const pending = this.buffered;
+      this.buffered = [];
+      for (const m of pending)
+        this.sendToPeer(m);
+    }
+  }
+  detach(ws, reason) {
+    if (this.peer !== ws)
+      return;
+    this.peer = null;
+    ws.data.attached = false;
+    this.log(`Peer detached (#${ws.data.clientId}, ${reason})`);
+    const inFlight = ws.data.pendingBackpressure.drainAll();
+    if (inFlight.length > 0) {
+      this.buffered = [...inFlight, ...this.buffered].slice(-MAX_BUFFERED_RELAY_MESSAGES);
+      this.log(`Re-buffered ${inFlight.length} in-flight message(s) for redelivery`);
+    }
+    this.emit("tuiDisconnected", ws.data.clientId);
+  }
+  handleIncoming(message) {
+    this.emit("agentMessage", { ...message, source: "codex" });
+  }
+  sendToPeer(message) {
+    const ws = this.peer;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      this.bufferMessage(message);
+      return false;
+    }
+    try {
+      const result = ws.send(JSON.stringify({ type: "codex_to_claude", message }));
+      if (typeof result === "number" && result === 0) {
+        this.log("Send to peer returned 0 (dropped) \u2014 buffering");
+        this.bufferMessage(message);
+        return false;
+      }
+      if (typeof result === "number" && result === -1) {
+        ws.data.pendingBackpressure.push(message);
+      }
+      return true;
+    } catch (err) {
+      this.log(`Send to peer failed: ${err?.message ?? err} \u2014 buffering`);
+      this.bufferMessage(message);
+      return false;
+    }
+  }
+  bufferMessage(message) {
+    this.buffered.push(message);
+    if (this.buffered.length > MAX_BUFFERED_RELAY_MESSAGES) {
+      this.buffered.splice(0, this.buffered.length - MAX_BUFFERED_RELAY_MESSAGES);
+    }
+  }
+  log(msg) {
+    this.logger.log(msg);
+  }
+}
 
 // src/control-token.ts
 import { chmodSync as chmodSync2, readFileSync as readFileSync2 } from "fs";
@@ -2732,6 +2944,11 @@ function replyRequiredInstruction(peerName) {
   return `
 
 [\u26A0\uFE0F REPLY REQUIRED] ${peerName} has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement \u2014 do not skip or use [STATUS]/[FYI] markers for this reply.`;
+}
+function relayReplyRequiredInstruction(peerName) {
+  return `
+
+[\u26A0\uFE0F REPLY REQUIRED] ${peerName} has explicitly requested a reply. You MUST reply via the reply tool, starting your message with the [IMPORTANT] marker. This is a mandatory requirement \u2014 do not skip or use [STATUS]/[FYI] markers for this reply.`;
 }
 
 class StatusBuffer {
@@ -6522,34 +6739,6 @@ var PAIR_SLOT_STRIDE = 10;
 var RECLAIMABLE_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 var MAX_PAIR_SLOT = Math.floor((65535 - 2 - PAIR_BASE_PORT) / PAIR_SLOT_STRIDE);
 
-// src/liveness-probe.ts
-var OPEN = 1;
-async function probeLiveness(target, options) {
-  const {
-    timeoutMs,
-    pollMs = 50,
-    now = Date.now,
-    sleep = (ms) => new Promise((r) => setTimeout(r, ms))
-  } = options;
-  if (target.readyState !== OPEN)
-    return false;
-  const baseline = target.pongCount;
-  try {
-    target.ping();
-  } catch {
-    return false;
-  }
-  const deadline = now() + timeoutMs;
-  while (now() < deadline) {
-    if (target.pongCount > baseline)
-      return true;
-    if (target.readyState !== OPEN)
-      return false;
-    await sleep(pollMs);
-  }
-  return target.pongCount > baseline;
-}
-
 // src/delivery-buffer.ts
 class BoundedMessageBuffer {
   messages = [];
@@ -6613,6 +6802,10 @@ var ATTENTION_WINDOW_MS = parseInt(process.env.AGENTBRIDGE_ATTENTION_WINDOW_MS ?
 var BOOTSTRAP_TIMEOUT_MS = parsePositiveIntEnv("AGENTBRIDGE_BOOTSTRAP_TIMEOUT_MS", 45000);
 var CODEX_BOOT_RETRIES = parsePositiveIntEnv("AGENTBRIDGE_CODEX_BOOT_RETRIES", 2);
 var ALLOW_IDENTITYLESS_CLIENT = process.env.AGENTBRIDGE_COMPAT_IDENTITYLESS === "1";
+var RELAY_MODE = process.env.AGENTBRIDGE_RELAY === "1";
+if (RELAY_MODE) {
+  process.env.AGENTBRIDGE_BUDGET_ENABLED = "0";
+}
 var BUDGET_CONFIG = applyBudgetEnvOverrides(config.budget);
 var RESUME_INJECT_RETRY_MS = parsePositiveIntEnv("AGENTBRIDGE_RESUME_INJECT_RETRY_MS", 5000, log);
 var RESUME_CONFIRM_TIMEOUT_MS = parsePositiveIntEnv("AGENTBRIDGE_RESUME_CONFIRM_TIMEOUT_MS", 60000, log);
@@ -6622,8 +6815,8 @@ var RESUME_ACK_RETRIES = parsePositiveIntEnv("AGENTBRIDGE_RESUME_ACK_RETRIES", 3
 var daemonLifecycle = new DaemonLifecycle({ stateDir, controlPort: CONTROL_PORT, log });
 var DAEMON_NONCE = randomUUID4();
 var DAEMON_STARTED_AT = Date.now();
-var codex = new CodexAdapter(CODEX_APP_PORT, CODEX_PROXY_PORT, stateDir.logFile);
-var attachCmd = `codex --enable tui_app_server --remote ${codex.proxyUrl}`;
+var codex = RELAY_MODE ? new PeerAdapter(stateDir.logFile) : new CodexAdapter(CODEX_APP_PORT, CODEX_PROXY_PORT, stateDir.logFile);
+var attachCmd = RELAY_MODE ? "abg claude --relay b   (\u6216 abg kimi --relay b \u2014 \u540C\u76EE\u5F55\u540C pair)" : `codex --enable tui_app_server --remote ${codex.proxyUrl}`;
 var controlServer = null;
 var boundControlPort = false;
 var attachedClaude = null;
@@ -7196,6 +7389,9 @@ function startControlServer() {
           if (attachedClaude === ws) {
             detachClaude(ws, "frontend socket closed");
           }
+          if (RELAY_MODE && codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+            codex.detach(ws, "frontend socket closed");
+          }
         },
         message: (ws, raw) => {
           handleControlMessage(ws, raw);
@@ -7245,11 +7441,32 @@ function handleControlMessage(ws, raw) {
         ws.close(admission.closeCode, admission.reason);
         return;
       }
+      const requestedSide = message.identity?.side;
+      if (requestedSide === "b") {
+        if (!RELAY_MODE || !(codex instanceof PeerAdapter)) {
+          log(`Rejecting side-b attach #${ws.data.clientId}: this pair is not a relay pair`);
+          ws.close(4000, "side b attach requires a relay pair (start it with --relay)");
+          return;
+        }
+        codex.attach(ws, message.identity, LIVENESS_PROBE_TIMEOUT_MS).then(() => {
+          if (codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+            sendStatus(ws);
+            broadcastStatus();
+          }
+        }).catch((err) => {
+          log(`PeerAdapter.attach threw for #${ws.data.clientId}: ${err?.message ?? err}`);
+        });
+        return;
+      }
       attachClaude(ws, message.identity).catch((err) => {
         log(`attachClaude threw for #${ws.data.clientId}: ${err?.message ?? err}`);
       });
       return;
     case "claude_disconnect":
+      if (RELAY_MODE && codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+        codex.detach(ws, "peer requested disconnect");
+        return;
+      }
       detachClaude(ws, "frontend requested disconnect");
       return;
     case "status":
@@ -7326,6 +7543,20 @@ function waitForInterruptOutcome(turnIds) {
   });
 }
 async function handleClaudeToCodex(ws, message) {
+  if (RELAY_MODE && codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+    if (message.message.source !== "claude") {
+      sendClaudeToCodexResult(ws, message.requestId, {
+        success: false,
+        code: "invalid_source",
+        error: "Invalid message source"
+      });
+      return;
+    }
+    log(`Relay peer \u2192 A (${message.message.content.length} chars)`);
+    codex.handleIncoming(message.message);
+    sendClaudeToCodexResult(ws, message.requestId, { success: true });
+    return;
+  }
   const attachGuard = evaluateInjectionAttachGuard(attachedClaude, ws);
   if (!attachGuard.allowed) {
     log(`Rejecting claude_to_codex from non-attached socket #${ws.data.clientId} ` + `(request ${message.requestId}, attached=${attachedClaude ? "#" + attachedClaude.data.clientId : "none"})`);
@@ -7384,7 +7615,7 @@ async function handleClaudeToCodex(ws, message) {
   const requireReply = !!message.requireReply;
   let contentToSend = message.message.content;
   if (requireReply) {
-    contentToSend += replyRequiredInstruction(attachedFrontendName);
+    contentToSend += RELAY_MODE ? relayReplyRequiredInstruction(attachedFrontendName) : replyRequiredInstruction(attachedFrontendName);
   }
   log(`Forwarding Claude \u2192 Codex (${message.message.content.length} chars, requireReply=${requireReply})`);
   const tierOverrides = BUDGET_CONFIG.codexTierControl ? budgetCoordinator?.getCodexTurnOverrides() ?? undefined : undefined;
@@ -7764,12 +7995,20 @@ function sendBridgeMessage(ws, message) {
   trySendBridgeMessage(ws, message);
 }
 function sendStatus(ws) {
-  sendProtocolMessage(ws, { type: "status", status: currentStatus() });
+  const status = currentStatus();
+  if (RELAY_MODE && codex instanceof PeerAdapter) {
+    status.peerName = codex.isAttachedSocket(ws) ? attachedFrontendName : codex.peerDisplayName;
+  } else {
+    status.peerName = "Codex";
+  }
+  sendProtocolMessage(ws, { type: "status", status });
 }
 function broadcastStatus() {
-  if (!attachedClaude)
-    return;
-  sendStatus(attachedClaude);
+  if (attachedClaude)
+    sendStatus(attachedClaude);
+  if (RELAY_MODE && codex instanceof PeerAdapter && codex.attachedSocket) {
+    sendStatus(codex.attachedSocket);
+  }
 }
 function sendProtocolMessage(ws, message) {
   try {
@@ -7803,6 +8042,16 @@ function currentStatus() {
   };
 }
 function currentWaitingMessage() {
+  if (RELAY_MODE) {
+    return [
+      "\u23F3 Waiting for the peer frontend (relay side b) to connect.",
+      `Current pair: cwd=${process.cwd()} pair=${process.env.AGENTBRIDGE_PAIR_NAME ?? "unknown"}`,
+      "Run in another terminal (same directory, same pair):",
+      attachCmd,
+      "For diagnostics: abg doctor"
+    ].join(`
+`);
+  }
   const pairId = process.env.AGENTBRIDGE_PAIR_ID ?? null;
   const offset = CODEX_PROXY_PORT - PAIR_BASE_PORT - 1;
   const slot = pairId !== null && offset >= 0 && offset % PAIR_SLOT_STRIDE === 0 ? offset / PAIR_SLOT_STRIDE : null;
@@ -7816,6 +8065,9 @@ function currentWaitingMessage() {
   });
 }
 function currentReadyMessage() {
+  if (RELAY_MODE && codex instanceof PeerAdapter) {
+    return `\u2705 ${codex.peerDisplayName} connected (relay). Bridge ready.`;
+  }
   return `\u2705 Codex TUI connected (${codex.activeThreadId}). Bridge ready.`;
 }
 function systemMessage(idPrefix, content) {

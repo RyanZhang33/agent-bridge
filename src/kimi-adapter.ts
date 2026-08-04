@@ -57,7 +57,7 @@ export class KimiAdapter extends ClaudeAdapter {
     super(logFile, {
       ...options,
       channelPush: false,
-      instructions: KIMI_INSTRUCTIONS,
+      instructions: options.instructions ?? KIMI_INSTRUCTIONS,
     });
   }
 }

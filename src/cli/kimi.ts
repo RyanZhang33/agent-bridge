@@ -6,6 +6,7 @@ import { applyPairEnv, parsePairFlag, type PairResolution } from "../pair-resolv
 import { appendTraceEvent, pickRelevantEnv } from "../trace-log";
 import { planMaxPermissions } from "./max-permissions";
 import { assertPairNotLive, mapChildExitCode } from "./claude";
+import { parseRelayFlag, applyRelayEnv } from "./relay-flag";
 
 /**
  * `abg kimi` — start Kimi Code as an AgentBridge frontend (mirrors `abg claude`).
@@ -48,10 +49,16 @@ export async function runKimi(args: string[]) {
   // Strip `--pair <name>` before anything else; the rest flows through to kimi.
   const { pairFlag, rest: pairRest } = parsePairFlag(args);
 
+  // Strip wrapper-owned `--relay a|b` and export the relay env BEFORE pair
+  // resolution, so the daemon (spawned below) and the MCP bridge-server
+  // (spawned by kimi) both inherit it.
+  const { relaySide, rest: relayRest } = parseRelayFlag(pairRest);
+  if (relaySide) applyRelayEnv(relaySide);
+
   // Max-permission default (mirrors the claude/codex wrappers): `abg kimi` runs
   // Kimi Code with --yolo unless --safe / AGENTBRIDGE_SAFE=1 / the user already
   // passed an explicit permission flag. `--safe` is wrapper-owned and stripped.
-  const permissionPlan = planMaxPermissions(pairRest, KIMI_MAX_PERMISSION_SUPPRESSORS);
+  const permissionPlan = planMaxPermissions(relayRest, KIMI_MAX_PERMISSION_SUPPRESSORS);
   const rest = permissionPlan.args;
 
   // Check for owned flag conflicts (on the real kimi args, not the pair flag).

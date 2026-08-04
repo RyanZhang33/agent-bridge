@@ -147,6 +147,8 @@ export class ClaudeAdapter extends EventEmitter {
 
   // Latest budget snapshot, fed by bridge from DaemonStatus.budget broadcasts.
   private budgetSnapshot: BudgetSnapshot | null = null;
+  /** Display name of the other side; defaults to "Codex" (see setPeerName). */
+  private peerName = "Codex";
   private readonly budgetFreshTtlMs: number;
   private readonly wallNow: () => number;
   // On-demand fresh-snapshot fetch (fresh-if-stale at get_budget). Wired by bridge
@@ -240,6 +242,15 @@ export class ClaudeAdapter extends EventEmitter {
   /** Cache the latest budget snapshot from the daemon (null clears it). */
   setBudgetSnapshot(snapshot: BudgetSnapshot | null) {
     this.budgetSnapshot = snapshot;
+  }
+
+  /**
+   * Display name of the other side (default "Codex"). The daemon broadcasts it
+   * in DaemonStatus.peerName (relay mode: the peer frontend's real name), and
+   * the bridge wires it here so mailbox/reply text names the peer correctly.
+   */
+  setPeerName(name: string | null | undefined) {
+    if (name) this.peerName = name;
   }
 
   /**
@@ -433,7 +444,7 @@ export class ClaudeAdapter extends EventEmitter {
 
     if (count === 0 && dropped === 0 && oversized === 0) {
       return {
-        content: [{ type: "text" as const, text: "No new messages from Codex." }],
+        content: [{ type: "text" as const, text: `No new messages from ${this.peerName}.` }],
       };
     }
 
@@ -448,7 +459,7 @@ export class ClaudeAdapter extends EventEmitter {
       for (const [source, sourceCount] of Object.entries(oversizedSourceCounts)) {
         notices.push(
           `${sourceCount} oversized message${sourceCount === 1 ? "" : "s"} ` +
-          `from ${formatSource(source as BridgeMessage["source"])} omitted ` +
+          `from ${this.displaySource(source as BridgeMessage["source"])} omitted ` +
           `(>${formatBytes(this.maxBufferedBytes)})`,
         );
       }
@@ -457,14 +468,14 @@ export class ClaudeAdapter extends EventEmitter {
     const formatted = unacked
       .map((entry, i) => {
         const ts = new Date(entry.message.timestamp).toISOString();
-        return `---\n[${i + 1}] ${ts} [id: ${entry.message.id}]\nCodex: ${entry.message.content}`;
+        return `---\n[${i + 1}] ${ts} [id: ${entry.message.id}]\n${this.peerName}: ${entry.message.content}`;
       })
       .join("\n\n");
 
     const noticeText = notices.map((notice) => `WARNING: ${notice}`).join("\n");
     const parts: string[] = [];
     if (count > 0) {
-      parts.push(`[${count} un-acked message${count > 1 ? "s" : ""} from Codex]\nchat_id: ${this.sessionId}`);
+      parts.push(`[${count} un-acked message${count > 1 ? "s" : ""} from ${this.peerName}]\nchat_id: ${this.sessionId}`);
     }
     if (noticeText) parts.push(noticeText);
     if (formatted) parts.push(formatted);
@@ -786,9 +797,9 @@ export class ClaudeAdapter extends EventEmitter {
 
     // Include pending message hint
     const pending = this.messageEntries.filter(e => !e.acked).length;
-    let responseText = "Reply sent to Codex.";
+    let responseText = `Reply sent to ${this.peerName}.`;
     if (onBusy === "steer") {
-      responseText = "Reply sent to Codex (will be steered into the running turn if one is active; watch for a system_steer_failed notice if the app-server rejects it).";
+      responseText = `Reply sent to ${this.peerName} (will be steered into the running turn if one is active; watch for a system_steer_failed notice if the app-server rejects it).`;
     } else if (onBusy === "interrupt") {
       // Honest wording: a success can mean EITHER an interrupt happened then the
       // message was injected, OR the running turn had already ended by dispatch
@@ -798,12 +809,16 @@ export class ClaudeAdapter extends EventEmitter {
       responseText = "Reply sent to Codex as a new turn (any turn still running was interrupted first; if it had already finished, your message was simply injected).";
     }
     if (pending > 0) {
-      responseText += ` Note: ${pending} unread Codex message${pending > 1 ? "s" : ""} already waiting \u2014 call get_messages to read them.`;
+      responseText += ` Note: ${pending} unread ${this.peerName} message${pending > 1 ? "s" : ""} already waiting — call get_messages to read them.`;
     }
 
     return {
       content: [{ type: "text" as const, text: responseText }],
     };
+  }
+
+  private displaySource(source: BridgeMessage["source"]): string {
+    return source === "codex" ? this.peerName : "Claude";
   }
 
   private log(msg: string) {

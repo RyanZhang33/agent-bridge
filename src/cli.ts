@@ -187,6 +187,10 @@ Options:
                      (abg claude runs with --dangerously-skip-permissions,
                      abg codex and abg kimi with --yolo by default;
                      AGENTBRIDGE_SAFE=1 also disables both.)
+  --relay a|b        Start a relay pair (frontend ↔ frontend, no Codex):
+                     two MCP frontends (claude/kimi in any combination)
+                     bridge directly. One side launches with --relay a,
+                     the other with --relay b, same directory, same pair.
   --help, -h         Show this help message
   --version, -v      Show version
 

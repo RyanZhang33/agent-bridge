@@ -8,9 +8,11 @@ import { randomUUID } from "node:crypto";
 import { BUILD_INFO, daemonStatusBuildInfo } from "./build-info";
 import { portFromUrl, type DaemonRecord } from "./daemon-record";
 import { CodexAdapter } from "./codex-adapter";
+import { PeerAdapter } from "./peer-adapter";
 import { validateClaudeClientIdentity, evaluateInjectionAttachGuard } from "./daemon-identity";
 import {
   replyRequiredInstruction,
+  relayReplyRequiredInstruction,
   StatusBuffer,
   routeCodexMessage,
   type FilterMode,
@@ -129,6 +131,15 @@ const BOOTSTRAP_TIMEOUT_MS = parsePositiveIntEnv("AGENTBRIDGE_BOOTSTRAP_TIMEOUT_
 // replacement is owned by the lifecycle (ensureRunning), not by retrying forever here.
 const CODEX_BOOT_RETRIES = parsePositiveIntEnv("AGENTBRIDGE_CODEX_BOOT_RETRIES", 2);
 const ALLOW_IDENTITYLESS_CLIENT = process.env.AGENTBRIDGE_COMPAT_IDENTITYLESS === "1";
+// Relay mode (AGENTBRIDGE_RELAY=1): this pair bridges TWO MCP frontends
+// (e.g. Kimi Code ↔ Claude Code) instead of frontend ↔ Codex. The codex slot
+// is served by a PeerAdapter wrapping the second frontend's control socket.
+// Budget coordination is meaningless without a Claude+Codex quota pair — force
+// it off BEFORE the budget config is evaluated on the next line.
+const RELAY_MODE = process.env.AGENTBRIDGE_RELAY === "1";
+if (RELAY_MODE) {
+  process.env.AGENTBRIDGE_BUDGET_ENABLED = "0";
+}
 // Budget coordination config: file config normalized + AGENTBRIDGE_BUDGET_* env overlay.
 const BUDGET_CONFIG = applyBudgetEnvOverrides(config.budget);
 const RESUME_INJECT_RETRY_MS = parsePositiveIntEnv("AGENTBRIDGE_RESUME_INJECT_RETRY_MS", 5000, log);
@@ -147,8 +158,12 @@ const daemonLifecycle = new DaemonLifecycle({ stateDir, controlPort: CONTROL_POR
 const DAEMON_NONCE = randomUUID();
 const DAEMON_STARTED_AT = Date.now();
 
-const codex = new CodexAdapter(CODEX_APP_PORT, CODEX_PROXY_PORT, stateDir.logFile);
-const attachCmd = `codex --enable tui_app_server --remote ${codex.proxyUrl}`;
+const codex: CodexAdapter | PeerAdapter = RELAY_MODE
+  ? new PeerAdapter(stateDir.logFile)
+  : new CodexAdapter(CODEX_APP_PORT, CODEX_PROXY_PORT, stateDir.logFile);
+const attachCmd = RELAY_MODE
+  ? "abg claude --relay b   (或 abg kimi --relay b — 同目录同 pair)"
+  : `codex --enable tui_app_server --remote ${codex.proxyUrl}`;
 
 let controlServer: ReturnType<typeof Bun.serve> | null = null;
 // Set true ONLY after Bun.serve successfully binds the control port. A losing
@@ -1166,6 +1181,9 @@ function startControlServer() {
         if (attachedClaude === ws) {
           detachClaude(ws, "frontend socket closed");
         }
+        if (RELAY_MODE && codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+          codex.detach(ws, "frontend socket closed");
+        }
       },
       message: (ws: ServerWebSocket<ControlSocketData>, raw) => {
         handleControlMessage(ws, raw);
@@ -1242,11 +1260,35 @@ function handleControlMessage(ws: ServerWebSocket<ControlSocketData>, raw: strin
         ws.close(admission.closeCode, admission.reason);
         return;
       }
+      // Relay side-B attach: the second frontend goes to the PeerAdapter slot.
+      const requestedSide = message.identity?.side;
+      if (requestedSide === "b") {
+        if (!RELAY_MODE || !(codex instanceof PeerAdapter)) {
+          log(`Rejecting side-b attach #${ws.data.clientId}: this pair is not a relay pair`);
+          ws.close(4000, "side b attach requires a relay pair (start it with --relay)");
+          return;
+        }
+        codex.attach(ws, message.identity, LIVENESS_PROBE_TIMEOUT_MS).then(() => {
+          // Only report if THIS socket won the slot (a rejected contestant was
+          // already closed inside attach and must not receive a status).
+          if (codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+            sendStatus(ws);
+            broadcastStatus(); // A side learns the peer attached + its name
+          }
+        }).catch((err) => {
+          log(`PeerAdapter.attach threw for #${ws.data.clientId}: ${err?.message ?? err}`);
+        });
+        return;
+      }
       attachClaude(ws, message.identity).catch((err) => {
         log(`attachClaude threw for #${ws.data.clientId}: ${err?.message ?? err}`);
       });
       return;
     case "claude_disconnect":
+      if (RELAY_MODE && codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+        codex.detach(ws, "peer requested disconnect");
+        return;
+      }
       detachClaude(ws, "frontend requested disconnect");
       return;
     case "status":
@@ -1367,6 +1409,24 @@ async function handleClaudeToCodex(
   ws: ServerWebSocket<ControlSocketData>,
   message: Extract<ControlClientMessage, { type: "claude_to_codex" }>,
 ): Promise<void> {
+  // Relay B→A: the sender is the attached PEER frontend (side b). Route its
+  // message through the codex-message path (marker filtering / reply tracker /
+  // attention window) instead of injecting — there is no Codex turn to start.
+  if (RELAY_MODE && codex instanceof PeerAdapter && codex.isAttachedSocket(ws)) {
+    if (message.message.source !== "claude") {
+      sendClaudeToCodexResult(ws, message.requestId, {
+        success: false,
+        code: "invalid_source",
+        error: "Invalid message source",
+      });
+      return;
+    }
+    log(`Relay peer → A (${message.message.content.length} chars)`);
+    codex.handleIncoming(message.message);
+    sendClaudeToCodexResult(ws, message.requestId, { success: true });
+    return;
+  }
+
   // Attach-convergence guard (arch-review P1 #283, defense layer 1). ONLY the
   // socket that passed `claude_connect` admission (and thus the pair/cwd + token
   // gate) and currently holds the attach slot may inject a turn into Codex. A
@@ -1468,7 +1528,9 @@ async function handleClaudeToCodex(
   // Only the DYNAMIC reply-required instruction is appended, on demand.
   let contentToSend = message.message.content;
   if (requireReply) {
-    contentToSend += replyRequiredInstruction(attachedFrontendName);
+    contentToSend += RELAY_MODE
+      ? relayReplyRequiredInstruction(attachedFrontendName)
+      : replyRequiredInstruction(attachedFrontendName);
   }
   log(`Forwarding Claude → Codex (${message.message.content.length} chars, requireReply=${requireReply})`);
   // Budget tier overrides (P4/R5) piggyback on this user-initiated turn —
@@ -2098,12 +2160,22 @@ function sendBridgeMessage(ws: ServerWebSocket<ControlSocketData>, message: Brid
 }
 
 function sendStatus(ws: ServerWebSocket<ControlSocketData>) {
-  sendProtocolMessage(ws, { type: "status", status: currentStatus() });
+  const status = currentStatus();
+  if (RELAY_MODE && codex instanceof PeerAdapter) {
+    // Personalized per recipient: the A side sees the peer's name, the peer
+    // sees A's name.
+    status.peerName = codex.isAttachedSocket(ws) ? attachedFrontendName : codex.peerDisplayName;
+  } else {
+    status.peerName = "Codex";
+  }
+  sendProtocolMessage(ws, { type: "status", status });
 }
 
 function broadcastStatus() {
-  if (!attachedClaude) return;
-  sendStatus(attachedClaude);
+  if (attachedClaude) sendStatus(attachedClaude);
+  if (RELAY_MODE && codex instanceof PeerAdapter && codex.attachedSocket) {
+    sendStatus(codex.attachedSocket);
+  }
 }
 
 function sendProtocolMessage(ws: ServerWebSocket<ControlSocketData>, message: ControlServerMessage) {
@@ -2156,6 +2228,15 @@ function currentStatus(): DaemonStatus {
 }
 
 function currentWaitingMessage() {
+  if (RELAY_MODE) {
+    return [
+      "⏳ Waiting for the peer frontend (relay side b) to connect.",
+      `Current pair: cwd=${process.cwd()} pair=${process.env.AGENTBRIDGE_PAIR_NAME ?? "unknown"}`,
+      "Run in another terminal (same directory, same pair):",
+      attachCmd,
+      "For diagnostics: abg doctor",
+    ].join("\n");
+  }
   // Surface the pair identity so a user whose Codex is attached elsewhere can
   // see WHY it isn't connecting here: a Codex started from a different cwd is a
   // different pair and will never attach to this daemon (the #1 pairing pitfall).
@@ -2176,6 +2257,9 @@ function currentWaitingMessage() {
 }
 
 function currentReadyMessage() {
+  if (RELAY_MODE && codex instanceof PeerAdapter) {
+    return `✅ ${codex.peerDisplayName} connected (relay). Bridge ready.`;
+  }
   return `✅ Codex TUI connected (${codex.activeThreadId}). Bridge ready.`;
 }
 

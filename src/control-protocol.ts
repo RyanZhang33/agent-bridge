@@ -25,6 +25,13 @@ export interface ControlClientIdentity {
    * wrapper, steer prefix). Absent on older frontends → treated as "claude".
    */
   frontend?: string;
+  /**
+   * Relay mode only (AGENTBRIDGE_RELAY=1): which side of a frontend↔frontend
+   * pair this attach claims. "a" = the primary slot (same socket role as the
+   * classic Claude frontend), "b" = the peer slot served by PeerAdapter.
+   * Absent in classic pairs and treated as "a" in relay pairs.
+   */
+  side?: "a" | "b";
 }
 
 /**
@@ -77,6 +84,12 @@ export interface DaemonStatus {
    * thread/closed sniff, …) assume a particular protocol snapshot.
    */
   appServerInfo?: AppServerInfo | null;
+  /**
+   * Display name of the OTHER side, personalized per recipient (relay mode:
+   * the peer frontend's name; classic pairs: "Codex"). Frontends use it to
+   * render mailbox/kickoff text with the real peer name.
+   */
+  peerName?: string;
 }
 
 export type ControlClientMessage =

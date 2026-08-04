@@ -114,6 +114,14 @@ export function replyRequiredInstruction(peerName: string): string {
   return `\n\n[⚠️ REPLY REQUIRED] ${peerName} has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement — do not skip or use [STATUS]/[FYI] markers for this reply.`;
 }
 
+/**
+ * Relay-mode variant: the recipient is an MCP frontend (no agentMessage
+ * interception) — it replies via the bridge's reply tool with the marker.
+ */
+export function relayReplyRequiredInstruction(peerName: string): string {
+  return `\n\n[⚠️ REPLY REQUIRED] ${peerName} has explicitly requested a reply. You MUST reply via the reply tool, starting your message with the [IMPORTANT] marker. This is a mandatory requirement — do not skip or use [STATUS]/[FYI] markers for this reply.`;
+}
+
 export class StatusBuffer {
   private buffer: BridgeMessage[] = [];
   private flushTimer: ReturnType<typeof setTimeout> | null = null;

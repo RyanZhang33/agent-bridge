@@ -65,19 +65,39 @@ if (
 const daemonLifecycle = new DaemonLifecycle({ stateDir, controlPort: CONTROL_PORT, log });
 const CONTROL_WS_URL = daemonLifecycle.controlWsUrl;
 
+// Relay mode (AGENTBRIDGE_RELAY=1): the peer is another MCP frontend, not
+// Codex — generic instructions replace the Codex-specific ones (tool surface
+// and mailbox semantics are identical; only the peer description changes).
+const RELAY_MODE = process.env.AGENTBRIDGE_RELAY === "1";
+const RELAY_INSTRUCTIONS = [
+  "You are connected to another AI coding agent (the peer) via AgentBridge in relay mode (frontend ↔ frontend, no Codex).",
+  "",
+  "## Message delivery",
+  "Messages from the peer are NOT pushed in real time — they are stored in the AgentBridge mailbox. Call get_messages proactively: after every reply you send, before you end your turn, and whenever the user asks about the peer.",
+  "Messages stay in the mailbox until acknowledged — pass ack_ids (from the [id: ...] labels) to confirm receipt and remove them.",
+  "",
+  "## How to interact",
+  "- Use the reply tool to send messages to the peer.",
+  "- Start high-priority messages with the [IMPORTANT] marker so they are forwarded immediately; use [STATUS] for progress updates and [FYI] for background context.",
+  "- After sending a reply, call get_messages to check for responses.",
+  "",
+  "## Collaboration language",
+  "- Use explicit phrases such as \"My independent view is:\", \"I agree on:\", \"I disagree on:\", and \"Current consensus:\".",
+].join("\n");
+
 // Thread the budget-freshness TTL from config → frontend so a config.json
 // `budget.budgetFreshTtlSec` actually governs get_budget (the daemon/coordinator
 // never read it — it is a frontend-only knob). applyBudgetEnvOverrides keeps the
 // env > config > default precedence consistent with the daemon side.
 const effectiveBudget = applyBudgetEnvOverrides(config.budget);
+const adapterOptions = {
+  budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000,
+  ...(RELAY_MODE ? { instructions: RELAY_INSTRUCTIONS } : {}),
+};
 const claude: ClaudeAdapter =
   FRONTEND_KIND === "kimi"
-    ? new KimiAdapter(stateDir.logFile, {
-        budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000,
-      })
-    : new ClaudeAdapter(stateDir.logFile, {
-        budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000,
-      });
+    ? new KimiAdapter(stateDir.logFile, adapterOptions)
+    : new ClaudeAdapter(stateDir.logFile, adapterOptions);
 // Pass the identity RESOLVER (not a snapshot) so the control token is read from
 // disk on each attach: the daemon may not have written it when bridge.ts starts,
 // and a daemon restart rotates the token (arch-review P1 #283).
@@ -200,16 +220,21 @@ daemonClient.on("status", (status) => {
   // Cache the latest budget snapshot for the get_budget tool (absent = sensing unavailable).
   claude.setBudgetSnapshot(status.budget ?? null);
 
+  // The daemon personalizes the peer display name per recipient (relay mode:
+  // the peer frontend's real name; classic pairs: "Codex").
+  claude.setPeerName(status.peerName);
+
   // Kickoff message on first TUI connect transition (not reconnects)
   if (!hasSeenTuiConnect && status.tuiConnected && !previousTuiConnected) {
     hasSeenTuiConnect = true;
+    const peerName = status.peerName ?? "Codex";
     log("First TUI connect detected — sending kickoff message to Claude");
     void claude.pushNotification(systemMessage(
       "system_tui_kickoff",
       [
-        "🤝 Codex has connected via AgentBridge.",
+        `🤝 ${peerName} has connected via AgentBridge.`,
         "You are now in a multi-agent collaboration session.",
-        "When you receive a complex task, propose a division of labor to Codex.",
+        `When you receive a complex task, propose a division of labor to ${peerName}.`,
         "Use `reply` to send messages and `get_messages` to check for responses.",
       ].join("\n"),
     ));
@@ -658,6 +683,10 @@ function currentClientIdentity(): ControlClientIdentity {
     // Report which frontend this is ("claude" | "kimi") so the daemon can name
     // the peer correctly in Codex-facing text.
     frontend: FRONTEND_KIND,
+    // Relay pairs: which side this frontend claims (launcher sets it via --relay).
+    ...(process.env.AGENTBRIDGE_RELAY_SIDE === "a" || process.env.AGENTBRIDGE_RELAY_SIDE === "b"
+      ? { side: process.env.AGENTBRIDGE_RELAY_SIDE as "a" | "b" }
+      : {}),
     ...(controlToken ? { controlToken } : {}),
   };
 }
