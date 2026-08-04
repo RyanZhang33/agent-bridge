@@ -88,7 +88,12 @@ export async function runClaude(args: string[]) {
   // stale/none → fall through and let admission take over). Also applies in
   // explicit manual mode so manual sessions do not silently fight over attach.
   // Fail-open on any probe error.
-  await assertPairNotLive(lifecycle, pair);
+  // Relay side b is exempt: it attaches to the PEER slot (PeerAdapter), not the
+  // A slot this guard watches — the guard would false-positive on the side-A
+  // frontend every relay pair needs.
+  if (relaySide !== "b") {
+    await assertPairNotLive(lifecycle, pair);
+  }
 
   lifecycle.clearKilled();
 

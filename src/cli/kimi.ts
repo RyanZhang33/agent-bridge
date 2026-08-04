@@ -94,9 +94,12 @@ export async function runKimi(args: string[]) {
     );
   }
 
-  // Conflict guard: a pair allows ONE frontend. If a Claude (or Kimi) session
-  // is already live on this pair, refuse to contest it.
-  await assertPairNotLive(lifecycle, pair);
+  // Conflict guard: a pair allows ONE frontend per slot. If a Claude (or Kimi)
+  // session is already live on this pair's A slot, refuse to contest it.
+  // Relay side b is exempt: it attaches to the peer slot, not the A slot.
+  if (relaySide !== "b") {
+    await assertPairNotLive(lifecycle, pair);
+  }
 
   lifecycle.clearKilled();
 
