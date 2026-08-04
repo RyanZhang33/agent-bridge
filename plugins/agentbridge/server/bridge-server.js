@@ -14166,8 +14166,8 @@ var CLAUDE_INSTRUCTIONS = [
   "Codex is an AI coding agent (OpenAI) running in a separate session on the same machine.",
   "",
   "## Message delivery",
-  'Messages from Codex arrive as <channel source="agentbridge" chat_id="..." user="Codex" ...> tags (push).',
-  "Messages are always queued \u2014 call get_messages to drain the fallback queue. Push delivery is a best-effort real-time optimization that may not arrive when Claude is idle.",
+  'Messages from Codex may arrive as <channel source="agentbridge" chat_id="..." user="Codex" ...> tags (push) \u2014 but the channel feature is unavailable in many Claude Code versions, so DO NOT rely on push.',
+  "Every message is always queued in the mailbox. Call get_messages proactively: after every reply you send, before you end your turn, and whenever the user asks about Codex \u2014 treat pull as the primary delivery path, not a fallback.",
   "",
   "## Collaboration roles",
   "Default roles in this setup:",
@@ -14793,10 +14793,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("2876967", "source"),
+  commit: defineString("2de8f25", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("b671a13fea4a", "source")
+  codeHash: defineString("1a2b5a1f281f", "source")
 });
 function sameRuntimeContract(a, b) {
   if (!a || !b)
