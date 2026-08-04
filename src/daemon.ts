@@ -1477,7 +1477,7 @@ async function handleClaudeToCodex(
     // the app-server ACCEPTS the steer (steerAccepted handler), so any new
     // forwarded agentMessage before the turn's terminal counts as the reply.
     const steerContent =
-      "[STEER from Claude]\n" +
+      "[STEER from the other agent]\n" +
       "Mid-turn update for the current Codex turn. Integrate if relevant; do not restart work unless explicitly requested.\n\n" +
       contentToSend;
     // Read the steer target BEFORE dispatch so an idempotency key can be

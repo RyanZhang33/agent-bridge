@@ -1,0 +1,40 @@
+# FORK.md — 本 fork 与上游的差异说明
+
+上游：[raysonmeng/agent-bridge](https://github.com/raysonmeng/agent-bridge)。
+本 fork 在上游基础上叠加了以下本地改动，用于个人多 agent 协作环境。升级上游时按此清单重打/核对补丁。
+
+## 改动清单
+
+### 1. Always-queue + ACK 邮箱（commit `058069c`）
+修复 Codex→前端推送在 idle 时静默丢失的问题（上游 Issue #223）：所有消息先入内存 ACK 邮箱（`get_messages` 可靠拉取，`ack_ids` 显式签收才移除），channel 推送降为实时优化。
+
+### 2. Kimi Code 前端支持
+让 Codex ↔ Kimi Code 通过 AgentBridge 协作（替代 Claude Code 前端）：
+- `src/kimi-adapter.ts`：`KimiAdapter extends ClaudeAdapter`，关闭 Claude 专有的 channel 推送，纯邮箱拉取；`claude-adapter.ts` 构造函数新增 `channelPush`/`instructions` 选项（默认行为不变）
+- `src/cli/kimi.ts`：`abg kimi` 启动器（默认注入 `--yolo`，单前端冲突守卫复用 claude 侧逻辑）
+- `src/kimi-session.ts` + `abg resume kimi`：读 `~/.kimi-code/session_index.jsonl` 找最近会话
+- `src/bridge.ts`：按 `AGENTBRIDGE_FRONTEND=kimi` 选择 adapter；**守卫**：kimi 前端无 pair env 时直接退出（用户级 mcp.json 会让普通 kimi 会话也拉起 bridge-server，不能让它抢占默认 pair）
+- Kimi 侧配置在机器上（不入库）：`~/.kimi-code/mcp.json` 注册 bridge-server 为 stdio MCP server
+- daemon / Codex 侧零改动（Kimi 消息继续打 `source:"claude"` 协议标签）
+
+### 3. 前端命名泛化
+Codex 可见文案中的 "Claude" 改为前端中立表述（REPLY_REQUIRED 包裹、steer 前缀、AGENTS.md 契约模板身份行）。
+
+### 4. 测试对齐
+`message-delivery.test.ts` 17 个用例对齐 ACK 邮箱语义（`pendingMessages`→`messageEntries`、drain 从"取出即清"变"ack 才清"）；新增 `kimi-session.test.ts`。
+
+## 部署备忘
+
+```bash
+bun run build:cli && bun run build:plugin
+npm install -g --force .     # abg 是 npm 全局安装，改完必须重装
+bun run test:unit            # 全绿才算完
+```
+
+- Claude 侧实际运行的是插件缓存拷贝（`~/.claude/plugins/cache/.../bridge-server.js`），改动 bridge-server 时需另行同步
+- 已知：`e2e-cli.test.ts` 两个 kill 用例在 macOS 本机预置失败（上游 HEAD 同样失败，与本 fork 改动无关）
+
+## 维护原则
+
+- 不改上游 README.md 等既有文件，避免 rebase 冲突；fork 说明集中在本文件
+- 本地运维笔记（含机器路径、pair ID 等）不入库

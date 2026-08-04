@@ -108,7 +108,7 @@ export function routeCodexMessage(
 // Appending it per-message polluted every Codex thread + its resume title, so it
 // was removed. AGENTS.md is the single source of truth for that contract now.
 // Only the DYNAMIC, per-message reply-required instruction remains here.
-const REPLY_REQUIRED_INSTRUCTION = `\n\n[⚠️ REPLY REQUIRED] Claude has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement — do not skip or use [STATUS]/[FYI] markers for this reply.`;
+const REPLY_REQUIRED_INSTRUCTION = `\n\n[⚠️ REPLY REQUIRED] The other agent has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement — do not skip or use [STATUS]/[FYI] markers for this reply.`;
 
 export { REPLY_REQUIRED_INSTRUCTION };
 

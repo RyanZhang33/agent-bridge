@@ -1313,7 +1313,7 @@ describe("daemon wiring", () => {
       expect(typeof rejected.retryAfterMs).toBe("number");
 
       // The steer path: message reaches the app-server as turn/steer with the
-      // explicit [STEER from Claude] framing, on the live thread.
+      // explicit [STEER from the other agent] framing, on the live thread.
       harness.sendClaudeToCodex("req-steer-1", "course correction: use approach B", { onBusy: "steer" });
       const accepted = await waitForResult("req-steer-1");
       expect(accepted.success).toBe(true);
@@ -1327,7 +1327,7 @@ describe("daemon wiring", () => {
       // — it would surface later as an async system_steer_failed.
       expect(steer.expectedTurnId).toBe("turn-1");
       expect(steer.input[0]!.type).toBe("text");
-      expect(steer.input[0]!.text.startsWith("[STEER from Claude]\n")).toBe(true);
+      expect(steer.input[0]!.text.startsWith("[STEER from the other agent]\n")).toBe(true);
       expect(steer.input[0]!.text).toContain("course correction: use approach B");
 
       // An app-server rejection after transport-accept surfaces as
@@ -1425,7 +1425,7 @@ describe("daemon wiring", () => {
       expect(injected.threadId).toBe("thread-fake-1");
       expect(injected.input[0].type).toBe("text");
       expect(injected.input[0].text).toContain("drop everything: new priority task");
-      expect(injected.input[0].text).not.toContain("[STEER from Claude]");
+      expect(injected.input[0].text).not.toContain("[STEER from the other agent]");
 
       // turn_started control event correlates requestId + idempotencyKey.
       await waitFor(

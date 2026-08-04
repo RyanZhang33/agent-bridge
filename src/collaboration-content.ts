@@ -68,7 +68,7 @@ export const AGENTS_MD_SECTION = `\
 ## AgentBridge — Multi-Agent Collaboration
 
 You are working in a **multi-agent environment** powered by AgentBridge.
-Another AI agent (Claude, by Anthropic) is available in a parallel session on this machine.
+Another AI agent (Claude Code or Kimi Code — whichever frontend started this pair) is available in a parallel session on this machine.
 
 ### Communication mechanism (read this first)
 AgentBridge is a **transparent proxy** on your side. You do **not** have a tool to "send a message to Claude".

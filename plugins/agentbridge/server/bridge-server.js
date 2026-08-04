@@ -10150,7 +10150,7 @@ function finalize(ctx, schema) {
     result.$schema = "http://json-schema.org/draft-07/schema#";
   } else if (ctx.target === "draft-04") {
     result.$schema = "http://json-schema.org/draft-04/schema#";
-  } else if (ctx.target === "openapi-3.0") {} else {}
+  } else if (ctx.target === "openapi-3.0") {}
   if (ctx.external?.uri) {
     const id = ctx.external.registry.get(schema)?.id;
     if (!id)
@@ -10372,7 +10372,7 @@ var literalProcessor = (schema, ctx, json, _params) => {
     if (val === undefined) {
       if (ctx.unrepresentable === "throw") {
         throw new Error("Literal `undefined` cannot be represented in JSON Schema");
-      } else {}
+      }
     } else if (typeof val === "bigint") {
       if (ctx.unrepresentable === "throw") {
         throw new Error("BigInt literals cannot be represented in JSON Schema");
@@ -14167,7 +14167,7 @@ var CLAUDE_INSTRUCTIONS = [
   "",
   "## Message delivery",
   'Messages from Codex arrive as <channel source="agentbridge" chat_id="..." user="Codex" ...> tags (push).',
-  "If a push fails, the message is queued \u2014 call get_messages to drain the fallback queue.",
+  "Messages are always queued \u2014 call get_messages to drain the fallback queue. Push delivery is a best-effort real-time optimization that may not arrive when Claude is idle.",
   "",
   "## Collaboration roles",
   "Default roles in this setup:",
@@ -14185,7 +14185,7 @@ var CLAUDE_INSTRUCTIONS = [
   "",
   "## How to interact",
   "- Use the reply tool to send messages back to Codex \u2014 pass chat_id back.",
-  "- Use the get_messages tool to check for pending messages from Codex.",
+  "- Use the get_messages tool to check for pending messages from Codex. Messages stay in the mailbox until acknowledged \u2014 pass ack_ids (from the [id: ...] labels) to confirm receipt and remove them.",
   "- After sending a reply, call get_messages to check for responses.",
   "- When the user asks about Codex status or progress, call get_messages.",
   "",
@@ -14211,8 +14211,7 @@ class ClaudeAdapter extends EventEmitter {
   resumeAckHandler = null;
   logFile;
   logger;
-  pendingMessages = [];
-  pendingMessageByteSizes = [];
+  messageEntries = [];
   pendingMessageBytes = 0;
   maxBufferedMessages;
   maxBufferedBytes;
@@ -14224,6 +14223,7 @@ class ClaudeAdapter extends EventEmitter {
   dedupeTtlMs;
   monotonicNow;
   deliveredMessageIds = new Map;
+  channelPushEnabled;
   budgetSnapshot = null;
   budgetFreshTtlMs;
   wallNow;
@@ -14247,12 +14247,13 @@ class ClaudeAdapter extends EventEmitter {
     this.monotonicNow = options.now ?? (() => performance.now());
     this.budgetFreshTtlMs = positiveIntegerOr(options.budgetFreshTtlMs, parsePositiveIntegerEnv("AGENTBRIDGE_BUDGET_FRESH_TTL_SEC", DEFAULT_BUDGET_FRESH_TTL_MS / 1000) * 1000);
     this.wallNow = options.wallNow ?? (() => Date.now());
+    this.channelPushEnabled = options.channelPush ?? true;
     this.server = new Server({ name: "agentbridge", version: "0.1.0" }, {
       capabilities: {
-        experimental: { "claude/channel": {} },
+        ...this.channelPushEnabled ? { experimental: { "claude/channel": {} } } : {},
         tools: {}
       },
-      instructions: CLAUDE_INSTRUCTIONS
+      instructions: options.instructions ?? CLAUDE_INSTRUCTIONS
     });
     this.setupHandlers();
   }
@@ -14269,7 +14270,7 @@ class ClaudeAdapter extends EventEmitter {
     this.resumeAckHandler = handler;
   }
   getPendingMessageCount() {
-    return this.pendingMessages.length;
+    return this.messageEntries.filter((e) => !e.acked).length;
   }
   setBudgetSnapshot(snapshot) {
     this.budgetSnapshot = snapshot;
@@ -14281,7 +14282,12 @@ class ClaudeAdapter extends EventEmitter {
     this.log(`pushNotification (instance=${this.instanceId}, msgId=${message.id}, len=${message.content.length})`);
     if (!this.rememberDelivery(message))
       return;
-    await this.pushViaChannel(message);
+    this.queueFallbackMessage(message);
+    if (this.channelPushEnabled) {
+      await this.pushViaChannel(message);
+    } else {
+      this.log(`Channel push disabled on this frontend \u2014 message ${message.id} queued for get_messages pull`);
+    }
   }
   async pushViaChannel(message) {
     const deliveryAttemptId = `codex_msg_${this.notificationIdPrefix}_${++this.notificationSeq}`;
@@ -14305,8 +14311,7 @@ class ClaudeAdapter extends EventEmitter {
       });
       this.log(`Pushed notification: ${message.id} (attempt=${deliveryAttemptId})`);
     } catch (e) {
-      this.log(`Push notification failed: ${e.message}`);
-      this.queueFallbackMessage(message);
+      this.log(`Push notification failed: ${e.message} (message remains in get_messages queue)`);
     }
   }
   rememberDelivery(message) {
@@ -14344,34 +14349,47 @@ class ClaudeAdapter extends EventEmitter {
       return;
     }
     let dropped = 0;
-    while (this.pendingMessages.length >= this.maxBufferedMessages || this.pendingMessageBytes + messageBytes > this.maxBufferedBytes) {
-      const droppedMessage = this.pendingMessages.shift();
-      const droppedBytes = this.pendingMessageByteSizes.shift() ?? 0;
-      if (!droppedMessage)
+    while (this.messageEntries.length >= this.maxBufferedMessages || this.pendingMessageBytes + messageBytes > this.maxBufferedBytes) {
+      const ackedIdx = this.messageEntries.findIndex((e) => e.acked);
+      const evictIdx = ackedIdx !== -1 ? ackedIdx : 0;
+      const evicted = this.messageEntries[evictIdx];
+      if (!evicted)
         break;
-      this.pendingMessageBytes = Math.max(0, this.pendingMessageBytes - droppedBytes);
-      this.droppedMessageCount++;
-      dropped++;
+      this.pendingMessageBytes = Math.max(0, this.pendingMessageBytes - evicted.bytes);
+      this.messageEntries.splice(evictIdx, 1);
+      if (!evicted.acked) {
+        this.droppedMessageCount++;
+        dropped++;
+      }
     }
     if (dropped > 0) {
-      this.log(`Fallback queue overflow: dropped ${dropped} oldest message${dropped > 1 ? "s" : ""} ` + `(${this.pendingMessages.length} pending, ${formatBytes(this.pendingMessageBytes)} buffered, ` + `${this.droppedMessageCount} dropped since last drain)`);
+      this.log(`Fallback queue overflow: dropped ${dropped} oldest un-acked message${dropped > 1 ? "s" : ""} ` + `(${this.messageEntries.filter((e) => !e.acked).length} un-acked pending, ` + `${formatBytes(this.pendingMessageBytes)} buffered, ` + `${this.droppedMessageCount} dropped since last drain)`);
     }
-    this.pendingMessages.push(message);
-    this.pendingMessageByteSizes.push(messageBytes);
+    this.messageEntries.push({ message, bytes: messageBytes, acked: false });
     this.pendingMessageBytes += messageBytes;
-    this.log(`Queued fallback message (${this.pendingMessages.length} pending, ` + `${formatBytes(this.pendingMessageBytes)} buffered, instance=${this.instanceId})`);
+    this.log(`Queued message (${this.messageEntries.filter((e) => !e.acked).length} un-acked, ` + `${formatBytes(this.pendingMessageBytes)} buffered, instance=${this.instanceId})`);
   }
-  drainMessages() {
-    this.log(`get_messages called (instance=${this.instanceId}, pending=${this.pendingMessages.length}, ` + `bytes=${this.pendingMessageBytes}, dropped=${this.droppedMessageCount}, oversized=${this.oversizedMessageCount})`);
-    if (this.pendingMessages.length === 0 && this.droppedMessageCount === 0 && this.oversizedMessageCount === 0) {
-      return {
-        content: [{ type: "text", text: "No new messages from Codex." }]
-      };
+  drainMessages(ackIds) {
+    const unackedBefore = this.messageEntries.filter((e) => !e.acked).length;
+    this.log(`get_messages called (instance=${this.instanceId}, unacked=${unackedBefore}, ` + `total=${this.messageEntries.length}, bytes=${this.pendingMessageBytes}, ` + `dropped=${this.droppedMessageCount}, oversized=${this.oversizedMessageCount}` + `${ackIds && ackIds.length > 0 ? `, ackIds=${ackIds.join(",")}` : ""})`);
+    if (ackIds && ackIds.length > 0) {
+      const ackSet = new Set(ackIds);
+      let ackedCount = 0;
+      this.messageEntries = this.messageEntries.filter((entry) => {
+        if (ackSet.has(entry.message.id)) {
+          this.pendingMessageBytes = Math.max(0, this.pendingMessageBytes - entry.bytes);
+          ackedCount++;
+          return false;
+        }
+        return true;
+      });
+      if (ackedCount > 0) {
+        this.log(`Acked ${ackedCount} message(s), ${this.messageEntries.filter((e) => !e.acked).length} un-acked remaining`);
+      }
     }
-    const messages = this.pendingMessages;
-    this.pendingMessages = [];
-    this.pendingMessageByteSizes = [];
-    this.pendingMessageBytes = 0;
+    const unacked = this.messageEntries.filter((e) => !e.acked);
+    const count = unacked.length;
+    const totalInMailbox = this.messageEntries.length;
     const dropped = this.droppedMessageCount;
     this.droppedMessageCount = 0;
     const oversizedSourceCounts = this.oversizedMessageSourceCounts;
@@ -14380,7 +14398,11 @@ class ClaudeAdapter extends EventEmitter {
     this.oversizedMessageSourceCounts = {};
     this.oversizedMessageCount = 0;
     this.oversizedMessageBytes = 0;
-    const count = messages.length;
+    if (count === 0 && dropped === 0 && oversized === 0) {
+      return {
+        content: [{ type: "text", text: "No new messages from Codex." }]
+      };
+    }
     const notices = [];
     if (dropped > 0) {
       notices.push(`${dropped} older message${dropped > 1 ? "s" : ""} ` + `${dropped > 1 ? "were" : "was"} dropped due to fallback queue overflow`);
@@ -14390,11 +14412,11 @@ class ClaudeAdapter extends EventEmitter {
         notices.push(`${sourceCount} oversized message${sourceCount === 1 ? "" : "s"} ` + `from ${formatSource(source)} omitted ` + `(>${formatBytes(this.maxBufferedBytes)})`);
       }
     }
-    const formatted = messages.map((msg, i) => {
-      const ts = new Date(msg.timestamp).toISOString();
+    const formatted = unacked.map((entry, i) => {
+      const ts = new Date(entry.message.timestamp).toISOString();
       return `---
-[${i + 1}] ${ts}
-Codex: ${msg.content}`;
+[${i + 1}] ${ts} [id: ${entry.message.id}]
+Codex: ${entry.message.content}`;
     }).join(`
 
 `);
@@ -14402,14 +14424,18 @@ Codex: ${msg.content}`;
 `);
     const parts2 = [];
     if (count > 0) {
-      parts2.push(`[${count} new message${count > 1 ? "s" : ""} from Codex]
+      parts2.push(`[${count} un-acked message${count > 1 ? "s" : ""} from Codex]
 chat_id: ${this.sessionId}`);
     }
     if (noticeText)
       parts2.push(noticeText);
     if (formatted)
       parts2.push(formatted);
-    this.log(`get_messages returning ${count} message(s) ` + `(instance=${this.instanceId}, dropped=${dropped}, oversized=${oversized}, oversizedBytes=${oversizedBytes})`);
+    const ackHint = unacked.map((e) => e.message.id);
+    if (ackHint.length > 0) {
+      parts2.push(`To acknowledge receipt, call get_messages with ack_ids: ${JSON.stringify(ackHint)}`);
+    }
+    this.log(`get_messages returning ${count} un-acked message(s) ` + `(${totalInMailbox} total in mailbox, instance=${this.instanceId})`);
     return {
       content: [
         {
@@ -14461,10 +14487,16 @@ chat_id: ${this.sessionId}`);
         },
         {
           name: "get_messages",
-          description: "Check for new messages from Codex. Call this after sending a reply or when you expect a response from Codex.",
+          description: "Check for new messages from Codex. Call this after sending a reply or when you expect a response from Codex. Messages remain in the mailbox until acknowledged \u2014 pass ack_ids (from the [id: ...] labels in the output) to confirm receipt and remove them.",
           inputSchema: {
             type: "object",
-            properties: {},
+            properties: {
+              ack_ids: {
+                type: "array",
+                items: { type: "string" },
+                description: "Optional list of message IDs to acknowledge. Acknowledged messages are permanently removed from the mailbox. Use the IDs shown in [id: ...] labels from previous get_messages output."
+              }
+            },
             required: []
           }
         },
@@ -14504,7 +14536,8 @@ chat_id: ${this.sessionId}`);
         return this.handleReply(args);
       }
       if (name === "get_messages") {
-        return this.drainMessages();
+        const ackIds = Array.isArray(args?.ack_ids) ? args.ack_ids.filter((id) => typeof id === "string" && id.length > 0) : undefined;
+        return this.drainMessages(ackIds);
       }
       if (name === "get_budget") {
         return this.handleGetBudget();
@@ -14645,7 +14678,7 @@ chat_id: ${this.sessionId}`);
         isError: true
       };
     }
-    const pending = this.pendingMessages.length;
+    const pending = this.messageEntries.filter((e) => !e.acked).length;
     let responseText = "Reply sent to Codex.";
     if (onBusy === "steer") {
       responseText = "Reply sent to Codex (will be steered into the running turn if one is active; watch for a system_steer_failed notice if the app-server rejects it).";
@@ -14685,6 +14718,54 @@ function formatBytes(bytes) {
   return `${bytes}B`;
 }
 
+// src/kimi-adapter.ts
+var KIMI_INSTRUCTIONS = [
+  "Codex is an AI coding agent (OpenAI) running in a separate session on the same machine.",
+  "",
+  "## Message delivery",
+  "Messages from Codex are NOT pushed to you in real time \u2014 Kimi Code has no MCP push channel. They are stored in the AgentBridge mailbox.",
+  "Call get_messages proactively: after every reply you send, before you end your turn, and whenever the user asks about Codex status or progress.",
+  "Messages stay in the mailbox until acknowledged \u2014 pass ack_ids (from the [id: ...] labels) to confirm receipt and remove them.",
+  "",
+  "## Collaboration roles",
+  "Default roles in this setup:",
+  "- Kimi: Reviewer, Planner, Hypothesis Challenger",
+  "- Codex: Implementer, Executor, Reproducer/Verifier",
+  "- Expect Codex to provide independent technical judgment and evidence, not passive agreement.",
+  "",
+  "## Thinking patterns (task-driven)",
+  "- Analytical/review tasks: Independent Analysis & Convergence",
+  "- Implementation tasks: Architect -> Builder -> Critic",
+  "- Debugging tasks: Hypothesis -> Experiment -> Interpretation",
+  "",
+  "## Collaboration language",
+  '- Use explicit phrases such as "My independent view is:", "I agree on:", "I disagree on:", and "Current consensus:".',
+  "",
+  "## How to interact",
+  "- Use the reply tool to send messages to Codex \u2014 pass chat_id back (from the chat_id line in get_messages output).",
+  "- After sending a reply, call get_messages to check for responses.",
+  "",
+  "## Turn coordination",
+  "- When you see '\u23F3 Codex is working', do NOT call the reply tool \u2014 wait for '\u2705 Codex finished' (check with get_messages).",
+  '- If the reply tool returns a busy error, Codex is still executing. You decide: wait and retry later, resend with on_busy="steer" to feed the message INTO the running turn (good for mid-course corrections; it does not interrupt or restart the work), or resend with on_busy="interrupt" to STOP the running turn and start a new one with your message (use only when the current work is obsolete \u2014 prefer steer otherwise).',
+  "",
+  "## Budget awareness",
+  "- Use the get_budget tool to check both agents' subscription quota (5h/weekly windows, drift, pause state).",
+  "- If the reply tool returns a budget-pause error (code budget_paused), do NOT retry; checkpoint your work and wait for the resume notice (poll get_messages for it).",
+  "- If the reply tool returns a budget_admission error, the 5h window is in finishing-protection: new tasks are declined, but you may bring the CURRENT collaboration to a checkpoint by resending with wrap_up=true (a small per-window quota). Do NOT start new work; once the quota is used or you are done, write a checkpoint and wait for the 5h window to refresh."
+].join(`
+`);
+
+class KimiAdapter extends ClaudeAdapter {
+  constructor(logFile = new StateDirResolver().logFile, options = {}) {
+    super(logFile, {
+      ...options,
+      channelPush: false,
+      instructions: KIMI_INSTRUCTIONS
+    });
+  }
+}
+
 // src/contract-version.ts
 var CONTRACT_VERSION = 1;
 
@@ -14707,10 +14788,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("99d0f4a", "source"),
+  commit: defineString("058069c", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("0cb79932198b", "source")
+  codeHash: defineString("2e0369934e52", "source")
 });
 function sameRuntimeContract(a, b) {
   if (!a || !b)
@@ -16489,10 +16570,17 @@ var processLogger = createProcessLogger({ component: "AgentBridgeFrontend", logF
 var configService = new ConfigService;
 var config2 = configService.loadOrDefault(processLogger.log);
 var CONTROL_PORT = parseInt(process.env.AGENTBRIDGE_CONTROL_PORT ?? "4502", 10);
+var FRONTEND_KIND = process.env.AGENTBRIDGE_FRONTEND ?? "claude";
+if (FRONTEND_KIND === "kimi" && !process.env.AGENTBRIDGE_PAIR_ID && !process.env.AGENTBRIDGE_STATE_DIR) {
+  console.error("[agentbridge] kimi frontend without pair env \u2014 start the session with `abg kimi`; bridge disabled for this session.");
+  process.exit(0);
+}
 var daemonLifecycle = new DaemonLifecycle({ stateDir, controlPort: CONTROL_PORT, log });
 var CONTROL_WS_URL = daemonLifecycle.controlWsUrl;
 var effectiveBudget = applyBudgetEnvOverrides(config2.budget);
-var claude = new ClaudeAdapter(stateDir.logFile, {
+var claude = FRONTEND_KIND === "kimi" ? new KimiAdapter(stateDir.logFile, {
+  budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000
+}) : new ClaudeAdapter(stateDir.logFile, {
   budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000
 });
 var daemonClient = new DaemonClient(CONTROL_WS_URL, { identity: currentClientIdentity });

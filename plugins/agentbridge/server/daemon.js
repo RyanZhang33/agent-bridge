@@ -30,10 +30,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("99d0f4a", "source"),
+  commit: defineString("058069c", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("0cb79932198b", "source")
+  codeHash: defineString("2e0369934e52", "source")
 });
 function daemonStatusBuildInfo() {
   return { ...BUILD_INFO };
@@ -2730,7 +2730,7 @@ function routeCodexMessage(content, ctx) {
 }
 var REPLY_REQUIRED_INSTRUCTION = `
 
-[\u26A0\uFE0F REPLY REQUIRED] Claude has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement \u2014 do not skip or use [STATUS]/[FYI] markers for this reply.`;
+[\u26A0\uFE0F REPLY REQUIRED] The other agent has explicitly requested a reply. You MUST send an agentMessage with [IMPORTANT] marker containing your response. This is a mandatory requirement \u2014 do not skip or use [STATUS]/[FYI] markers for this reply.`;
 class StatusBuffer {
   onFlush;
   buffer = [];
@@ -7382,7 +7382,7 @@ async function handleClaudeToCodex(ws, message) {
   log(`Forwarding Claude \u2192 Codex (${message.message.content.length} chars, requireReply=${requireReply})`);
   const tierOverrides = BUDGET_CONFIG.codexTierControl ? budgetCoordinator?.getCodexTurnOverrides() ?? undefined : undefined;
   if (codex.turnInProgress && message.onBusy === "steer") {
-    const steerContent = `[STEER from Claude]
+    const steerContent = `[STEER from the other agent]
 ` + `Mid-turn update for the current Codex turn. Integrate if relevant; do not restart work unless explicitly requested.
 
 ` + contentToSend;
