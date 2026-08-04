@@ -24,6 +24,8 @@ import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { createProcessLogger, type ProcessLogger } from "./process-log";
 import { StateDirResolver } from "./state-dir";
+import { atomicWriteJson } from "./atomic-json";
+import { join } from "node:path";
 import type { BridgeMessage } from "./types";
 import type { BudgetSnapshot } from "./budget/types";
 import { renderBudgetSnapshot, BUDGET_UNAVAILABLE_TEXT } from "./budget/render";
@@ -157,11 +159,27 @@ export class ClaudeAdapter extends EventEmitter {
   // Single-flight guard: concurrent get_budget calls share ONE in-flight refresh
   // (the no-requestId budget_refresh waiter cannot disambiguate parallel requests).
   private pendingBudgetRefresh: Promise<BudgetSnapshot | null> | null = null;
+  /**
+   * Mailbox signal file for Stop-hook wakeup (`<stateDir>/mailbox-pending-<frontend>.json`):
+   * written on every queue/drain so a host hook can tell "mailbox non-empty"
+   * without querying this process. Per-frontend filename because a relay pair's
+   * two bridge-servers share one state dir. null when the state dir is
+   * unresolvable — the signal is best-effort and never blocks delivery.
+   */
+  private readonly signalFile: string | null;
+  /** Wall-clock of the last queue — the hook's dedupe key. */
+  private lastQueueAt = 0;
 
   constructor(logFile = new StateDirResolver().logFile, options: ClaudeAdapterOptions = {}) {
     super();
     this.logFile = logFile;
     this.logger = createProcessLogger({ component: "ClaudeAdapter", logFile: this.logFile });
+    try {
+      const frontend = process.env.AGENTBRIDGE_FRONTEND ?? "claude";
+      this.signalFile = join(new StateDirResolver().dir, `mailbox-pending-${frontend}.json`);
+    } catch {
+      this.signalFile = null;
+    }
     this.instanceId = randomUUID().slice(0, 8);
     this.sessionId = `codex_${Date.now()}`;
     this.notificationIdPrefix = randomUUID().replace(/-/g, "").slice(0, 12);
@@ -385,10 +403,29 @@ export class ClaudeAdapter extends EventEmitter {
 
     this.messageEntries.push({ message, bytes: messageBytes, acked: false });
     this.pendingMessageBytes += messageBytes;
+    this.lastQueueAt = Date.now();
+    this.writeMailboxSignal();
     this.log(
       `Queued message (${this.messageEntries.filter(e => !e.acked).length} un-acked, ` +
       `${formatBytes(this.pendingMessageBytes)} buffered, instance=${this.instanceId})`,
     );
+  }
+
+  /**
+   * Persist the mailbox state for the host's Stop hook (check-mailbox.cjs):
+   * `{count, latestAt}` — count = un-acked messages, latestAt = last queue time
+   * (the hook's dedupe key). Best-effort: any failure is swallowed.
+   */
+  private writeMailboxSignal() {
+    if (!this.signalFile) return;
+    try {
+      atomicWriteJson(this.signalFile, {
+        count: this.messageEntries.filter(e => !e.acked).length,
+        latestAt: this.lastQueueAt,
+      });
+    } catch {
+      /* signal is best-effort */
+    }
   }
 
   // ── get_messages ───────────────────────────────────────────
@@ -431,6 +468,7 @@ export class ClaudeAdapter extends EventEmitter {
     const unacked = this.messageEntries.filter(e => !e.acked);
     const count = unacked.length;
     const totalInMailbox = this.messageEntries.length;
+    this.writeMailboxSignal();
 
     // Report dropped/oversized since last call, then reset.
     const dropped = this.droppedMessageCount;

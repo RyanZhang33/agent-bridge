@@ -13661,7 +13661,7 @@ class StdioServerTransport {
 
 // src/claude-adapter.ts
 import { EventEmitter } from "events";
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 import { performance } from "perf_hooks";
 
 // src/rotating-log.ts
@@ -13865,6 +13865,44 @@ class StateDirResolver {
     return join(this.stateDir, "update-check.json");
   }
 }
+
+// src/atomic-json.ts
+import * as fs from "fs";
+import { randomUUID } from "crypto";
+import { dirname as dirname2 } from "path";
+function tmpPathFor(targetPath) {
+  return `${targetPath}.tmp.${process.pid}.${randomUUID()}`;
+}
+function atomicWriteText(path, content, options = {}) {
+  fs.mkdirSync(dirname2(path), { recursive: true });
+  const tmp = tmpPathFor(path);
+  let renamed = false;
+  const fd = fs.openSync(tmp, "w", options.mode ?? 438);
+  try {
+    try {
+      fs.writeFileSync(fd, content, "utf-8");
+      if (options.fsync)
+        fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, path);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        fs.unlinkSync(tmp);
+      } catch {}
+    }
+  }
+}
+function atomicWriteJson(path, value, options = {}) {
+  atomicWriteText(path, JSON.stringify(value, null, 2) + `
+`, options);
+}
+
+// src/claude-adapter.ts
+import { join as join2 } from "path";
 
 // src/budget/format-time.ts
 var BEIJING_TZ = "Asia/Shanghai";
@@ -14230,13 +14268,21 @@ class ClaudeAdapter extends EventEmitter {
   wallNow;
   requestFreshSnapshot = null;
   pendingBudgetRefresh = null;
+  signalFile;
+  lastQueueAt = 0;
   constructor(logFile = new StateDirResolver().logFile, options = {}) {
     super();
     this.logFile = logFile;
     this.logger = createProcessLogger({ component: "ClaudeAdapter", logFile: this.logFile });
-    this.instanceId = randomUUID().slice(0, 8);
+    try {
+      const frontend = process.env.AGENTBRIDGE_FRONTEND ?? "claude";
+      this.signalFile = join2(new StateDirResolver().dir, `mailbox-pending-${frontend}.json`);
+    } catch {
+      this.signalFile = null;
+    }
+    this.instanceId = randomUUID2().slice(0, 8);
     this.sessionId = `codex_${Date.now()}`;
-    this.notificationIdPrefix = randomUUID().replace(/-/g, "").slice(0, 12);
+    this.notificationIdPrefix = randomUUID2().replace(/-/g, "").slice(0, 12);
     this.log(`ClaudeAdapter created (instance=${this.instanceId})`);
     if (process.env.AGENTBRIDGE_MODE) {
       this.log(`AGENTBRIDGE_MODE="${process.env.AGENTBRIDGE_MODE}" is no longer supported \u2014 ` + "pull mode was removed; push delivery (with per-message fallback queue) is always used.");
@@ -14372,7 +14418,19 @@ class ClaudeAdapter extends EventEmitter {
     }
     this.messageEntries.push({ message, bytes: messageBytes, acked: false });
     this.pendingMessageBytes += messageBytes;
+    this.lastQueueAt = Date.now();
+    this.writeMailboxSignal();
     this.log(`Queued message (${this.messageEntries.filter((e) => !e.acked).length} un-acked, ` + `${formatBytes(this.pendingMessageBytes)} buffered, instance=${this.instanceId})`);
+  }
+  writeMailboxSignal() {
+    if (!this.signalFile)
+      return;
+    try {
+      atomicWriteJson(this.signalFile, {
+        count: this.messageEntries.filter((e) => !e.acked).length,
+        latestAt: this.lastQueueAt
+      });
+    } catch {}
   }
   drainMessages(ackIds) {
     const unackedBefore = this.messageEntries.filter((e) => !e.acked).length;
@@ -14395,6 +14453,7 @@ class ClaudeAdapter extends EventEmitter {
     const unacked = this.messageEntries.filter((e) => !e.acked);
     const count = unacked.length;
     const totalInMailbox = this.messageEntries.length;
+    this.writeMailboxSignal();
     const dropped = this.droppedMessageCount;
     this.droppedMessageCount = 0;
     const oversizedSourceCounts = this.oversizedMessageSourceCounts;
@@ -14793,10 +14852,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("2de8f25", "source"),
+  commit: defineString("d435b5c", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("1a2b5a1f281f", "source")
+  codeHash: defineString("6a59cfe82153", "source")
 });
 function sameRuntimeContract(a, b) {
   if (!a || !b)
@@ -15159,41 +15218,6 @@ class DaemonClient extends EventEmitter2 {
 import { spawn } from "child_process";
 import { existsSync as existsSync3, readFileSync as readFileSync2, statSync as statSync2, unlinkSync as unlinkSync3, writeFileSync as writeFileSync2, openSync as openSync2, closeSync as closeSync2, constants } from "fs";
 import { fileURLToPath } from "url";
-
-// src/atomic-json.ts
-import * as fs from "fs";
-import { randomUUID as randomUUID2 } from "crypto";
-import { dirname as dirname2 } from "path";
-function tmpPathFor(targetPath) {
-  return `${targetPath}.tmp.${process.pid}.${randomUUID2()}`;
-}
-function atomicWriteText(path, content, options = {}) {
-  fs.mkdirSync(dirname2(path), { recursive: true });
-  const tmp = tmpPathFor(path);
-  let renamed = false;
-  const fd = fs.openSync(tmp, "w", options.mode ?? 438);
-  try {
-    try {
-      fs.writeFileSync(fd, content, "utf-8");
-      if (options.fsync)
-        fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
-    fs.renameSync(tmp, path);
-    renamed = true;
-  } finally {
-    if (!renamed) {
-      try {
-        fs.unlinkSync(tmp);
-      } catch {}
-    }
-  }
-}
-function atomicWriteJson(path, value, options = {}) {
-  atomicWriteText(path, JSON.stringify(value, null, 2) + `
-`, options);
-}
 
 // src/env-utils.ts
 function parsePositiveIntEnv(name, fallback, log = () => {}, env = process.env) {
@@ -15835,7 +15859,7 @@ async function fetchWithTimeout(url, timeoutMs = HEALTH_FETCH_TIMEOUT_MS) {
 
 // src/config-service.ts
 import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, existsSync as existsSync4 } from "fs";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 var DEFAULT_BUDGET_CONFIG = {
   enabled: true,
   pollSeconds: 300,
@@ -16124,8 +16148,8 @@ class ConfigService {
   configPath;
   constructor(projectRoot) {
     const root = projectRoot ?? process.cwd();
-    this.configDir = join2(root, CONFIG_DIR);
-    this.configPath = join2(this.configDir, CONFIG_FILE);
+    this.configDir = join3(root, CONFIG_DIR);
+    this.configPath = join3(this.configDir, CONFIG_FILE);
   }
   hasConfig() {
     return existsSync4(this.configPath);
@@ -16237,7 +16261,7 @@ import {
   writeFileSync as writeFileSync3
 } from "fs";
 import { createHash, randomUUID as randomUUID3 } from "crypto";
-import { basename as basename2, join as join3, resolve, sep } from "path";
+import { basename as basename2, join as join4, resolve, sep } from "path";
 var PAIR_BASE_PORT = 4500;
 var PAIR_SLOT_STRIDE = 10;
 var PAIR_ID_REGEX = /^[A-Za-z0-9._-]{1,64}$/;
@@ -16266,10 +16290,10 @@ function derivePairId(cwd, name) {
   return `${slug}-${hash}`;
 }
 function pairsDir(base) {
-  return join3(base, "pairs");
+  return join4(base, "pairs");
 }
 function registryPath(base) {
-  return join3(pairsDir(base), REGISTRY_FILE_NAME);
+  return join4(pairsDir(base), REGISTRY_FILE_NAME);
 }
 function readRegistry(base) {
   const path = registryPath(base);
@@ -16430,10 +16454,10 @@ function nonEmpty(value) {
 
 // src/control-token.ts
 import { chmodSync, readFileSync as readFileSync5 } from "fs";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 var CONTROL_TOKEN_FILENAME = "control-token";
 function resolveControlTokenPath(stateDir) {
-  return join4(stateDir, CONTROL_TOKEN_FILENAME);
+  return join5(stateDir, CONTROL_TOKEN_FILENAME);
 }
 function readControlToken(path) {
   try {
@@ -16446,7 +16470,7 @@ function readControlToken(path) {
 
 // src/trace-log.ts
 import { appendFileSync as appendFileSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, readdirSync as readdirSync2, statSync as statSync4, unlinkSync as unlinkSync5 } from "fs";
-import { join as join5 } from "path";
+import { join as join6 } from "path";
 var TRACE_RETENTION_DAYS = 7;
 var TRACE_FILE_RE = /^trace-\d{4}-\d{2}-\d{2}\.jsonl$/;
 var SECRET_KEY_RE = /(token|secret|password|passwd|api[_-]?key|auth|cookie|session)/i;
@@ -16486,7 +16510,7 @@ function redactArgv(argv) {
 }
 function traceLogPath(cwd, timestamp) {
   const day = timestamp.slice(0, 10);
-  return join5(cwd, ".agentbridge", "logs", `trace-${day}.jsonl`);
+  return join6(cwd, ".agentbridge", "logs", `trace-${day}.jsonl`);
 }
 function appendTraceEvent(input) {
   const timestamp = input.timestamp ?? new Date().toISOString();
@@ -16500,7 +16524,7 @@ function appendTraceEvent(input) {
     ...input.env ? { env: pickRelevantEnv(input.env) } : {},
     ...input.data ? { data: redactData(input.data) } : {}
   };
-  const logsDir = join5(input.cwd, ".agentbridge", "logs");
+  const logsDir = join6(input.cwd, ".agentbridge", "logs");
   const isNewDayFile = !existsSync6(path);
   mkdirSync5(logsDir, { recursive: true });
   if (isNewDayFile) {
@@ -16523,7 +16547,7 @@ function pruneOldTraceLogs(logsDir, keepPath, nowMs) {
   for (const name of entries) {
     if (!TRACE_FILE_RE.test(name))
       continue;
-    const filePath = join5(logsDir, name);
+    const filePath = join6(logsDir, name);
     if (filePath === keepPath)
       continue;
     try {
