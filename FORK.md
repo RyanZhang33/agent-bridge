@@ -17,8 +17,8 @@
 - Kimi 侧配置在机器上（不入库）：`~/.kimi-code/mcp.json` 注册 bridge-server 为 stdio MCP server
 - daemon / Codex 侧零改动（Kimi 消息继续打 `source:"claude"` 协议标签）
 
-### 3. 前端命名泛化
-Codex 可见文案中的 "Claude" 改为前端中立表述（REPLY_REQUIRED 包裹、steer 前缀、AGENTS.md 契约模板身份行）。
+### 3. 前端身份动态命名
+Codex 可见文案中的对端名称按实际前端动态生成：前端在 `claude_connect` 的 identity 里上报 `frontend` 字段（"claude" | "kimi"），daemon 在 attach 时解析存下，REPLY REQUIRED 包裹（"Kimi has explicitly requested a reply"）和 steer 前缀（"[STEER from Kimi]"）都使用真实名字。老前端无此字段时默认 Claude，向后兼容。（早期版本曾把文案静态泛化为 "the other agent"，已被本方案取代。）
 
 ### 4. 测试对齐
 `message-delivery.test.ts` 17 个用例对齐 ACK 邮箱语义（`pendingMessages`→`messageEntries`、drain 从"取出即清"变"ack 才清"）；新增 `kimi-session.test.ts`。
