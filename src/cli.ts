@@ -17,12 +17,12 @@ import { cliInvocationName } from "./cli-invocation";
 export const MARKETPLACE_NAME = "agentbridge";
 export const PLUGIN_NAME = "agentbridge";
 
-/** Commands that print an update notice. claude/codex/resume also trigger the daily refresh. */
-export const REFRESH_COMMANDS = new Set(["claude", "codex", "resume"]);
-export const NOTIFY_COMMANDS = new Set(["claude", "codex", "init", "dev", "resume"]);
+/** Commands that print an update notice. claude/codex/kimi/resume also trigger the daily refresh. */
+export const REFRESH_COMMANDS = new Set(["claude", "codex", "kimi", "resume"]);
+export const NOTIFY_COMMANDS = new Set(["claude", "codex", "kimi", "init", "dev", "resume"]);
 
 /** Subcommands that accept a `--pair <name>` selector. */
-export const PAIR_AWARE_COMMANDS = new Set(["claude", "codex", "kill", "doctor", "budget", "resume", "logs"]);
+export const PAIR_AWARE_COMMANDS = new Set(["claude", "codex", "kimi", "kill", "doctor", "budget", "resume", "logs"]);
 
 /**
  * Split argv into the subcommand and its args, allowing a leading `--pair <name>`
@@ -95,6 +95,10 @@ async function main(command: string | undefined, restArgs: string[]) {
       const { runCodex } = await import("./cli/codex");
       await runCodex(restArgs);
       break;
+    case "kimi":
+      const { runKimi } = await import("./cli/kimi");
+      await runKimi(restArgs);
+      break;
     case "resume":
       const { runResume } = await import("./cli/resume");
       await runResume(restArgs);
@@ -151,9 +155,11 @@ Commands:
   init               Install plugin, check dependencies, generate project config
   dev                Register local marketplace + install plugin (for local dev)
   claude [args...]   Start Claude Code with push channel enabled
+  kimi [args...]     Start Kimi Code connected to AgentBridge daemon
+                     (mailbox-only delivery — no push channel on Kimi)
   codex [args...]    Start Codex TUI connected to AgentBridge daemon
                      (bare command auto-resumes the last thread; --new starts fresh)
-  resume [claude|codex]
+  resume [claude|codex|kimi]
                      No target: print resume commands for this directory's last
                      Claude session + this pair's current Codex thread.
                      With target: resume that side directly.
@@ -178,9 +184,9 @@ Options:
                      Goes AFTER the command (abg claude --safe); also auto-
                      suppressed when you pass any explicit permission flag
                      (-a/--sandbox for codex, --permission-mode for claude).
-                     (abg claude runs with --dangerously-skip-permissions and
-                     abg codex with --yolo by default; AGENTBRIDGE_SAFE=1 also
-                     disables both.)
+                     (abg claude runs with --dangerously-skip-permissions,
+                     abg codex and abg kimi with --yolo by default;
+                     AGENTBRIDGE_SAFE=1 also disables both.)
   --help, -h         Show this help message
   --version, -v      Show version
 
@@ -193,9 +199,11 @@ Multi-pair:
 Examples:
   ${cli} init                     # First-time setup
   ${cli} claude                   # Start the "main" pair for this directory
+  ${cli} kimi                     # Same, with Kimi Code as the frontend
   ${cli} codex                    # Connect Codex to this directory's "main" pair
   ${cli} resume                   # Print resume commands for both sides
   ${cli} resume claude            # Resume the last Claude Code session here
+  ${cli} resume kimi              # Resume the last Kimi Code session here
   ${cli} resume codex             # Resume this pair's current Codex thread
   ${cli} claude --safe            # One launch without the max-permission default
   ${cli} --pair work claude       # Start a named pair "work" (this directory)

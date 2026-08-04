@@ -219,7 +219,7 @@ function traceCliStart(
  * returns so the launch proceeds; the daemon's admission logic then takes over
  * the stale slot cleanly. Any probe error fails open (launch proceeds).
  */
-async function assertPairNotLive(lifecycle: DaemonLifecycle, pair: PairResolution): Promise<void> {
+export async function assertPairNotLive(lifecycle: DaemonLifecycle, pair: PairResolution): Promise<void> {
   let healthy = false;
   try {
     healthy = await lifecycle.isHealthy();

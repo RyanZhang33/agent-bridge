@@ -2,6 +2,7 @@
 
 import { existsSync } from "node:fs";
 import { ClaudeAdapter } from "./claude-adapter";
+import { KimiAdapter } from "./kimi-adapter";
 import { BUILD_INFO } from "./build-info";
 import { DaemonClient } from "./daemon-client";
 import { DaemonLifecycle } from "./daemon-lifecycle";
@@ -42,6 +43,25 @@ const configService = new ConfigService();
 const config = configService.loadOrDefault(processLogger.log);
 
 const CONTROL_PORT = parseInt(process.env.AGENTBRIDGE_CONTROL_PORT ?? "4502", 10);
+
+// Kimi frontend guard: the kimi MCP entry is registered user-level
+// (~/.kimi-code/mcp.json), so EVERY plain `kimi` session would spawn this
+// bridge-server. Without pair env (AGENTBRIDGE_PAIR_ID / AGENTBRIDGE_STATE_DIR,
+// injected by `abg kimi`) there is no pair context — attaching would contest
+// the default pair's live frontend or spawn a stray daemon. Exit quietly
+// instead; the kimi session itself is unaffected (MCP server just fails).
+const FRONTEND_KIND = process.env.AGENTBRIDGE_FRONTEND ?? "claude";
+if (
+  FRONTEND_KIND === "kimi" &&
+  !process.env.AGENTBRIDGE_PAIR_ID &&
+  !process.env.AGENTBRIDGE_STATE_DIR
+) {
+  console.error(
+    "[agentbridge] kimi frontend without pair env — start the session with `abg kimi`; bridge disabled for this session.",
+  );
+  process.exit(0);
+}
+
 const daemonLifecycle = new DaemonLifecycle({ stateDir, controlPort: CONTROL_PORT, log });
 const CONTROL_WS_URL = daemonLifecycle.controlWsUrl;
 
@@ -50,9 +70,14 @@ const CONTROL_WS_URL = daemonLifecycle.controlWsUrl;
 // never read it — it is a frontend-only knob). applyBudgetEnvOverrides keeps the
 // env > config > default precedence consistent with the daemon side.
 const effectiveBudget = applyBudgetEnvOverrides(config.budget);
-const claude = new ClaudeAdapter(stateDir.logFile, {
-  budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000,
-});
+const claude: ClaudeAdapter =
+  FRONTEND_KIND === "kimi"
+    ? new KimiAdapter(stateDir.logFile, {
+        budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000,
+      })
+    : new ClaudeAdapter(stateDir.logFile, {
+        budgetFreshTtlMs: effectiveBudget.budgetFreshTtlSec * 1000,
+      });
 // Pass the identity RESOLVER (not a snapshot) so the control token is read from
 // disk on each attach: the daemon may not have written it when bridge.ts starts,
 // and a daemon restart rotates the token (arch-review P1 #283).

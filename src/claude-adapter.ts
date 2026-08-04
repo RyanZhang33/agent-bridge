@@ -51,6 +51,18 @@ export interface ClaudeAdapterOptions {
   budgetFreshTtlMs?: number;
   /** Wall-clock milliseconds for the budget-freshness check; defaults to Date.now(). */
   wallNow?: () => number;
+  /**
+   * Whether to declare the `claude/channel` capability and push notifications
+   * via `notifications/claude/channel`. Defaults to true. Kimi Code has no
+   * channel equivalent, so KimiAdapter passes false — delivery then relies on
+   * the ACK mailbox + get_messages pull only.
+   */
+  channelPush?: boolean;
+  /**
+   * MCP `instructions` override. Defaults to CLAUDE_INSTRUCTIONS; KimiAdapter
+   * passes KIMI_INSTRUCTIONS (pull-oriented wording).
+   */
+  instructions?: string;
 }
 
 const DEFAULT_MAX_BUFFERED_MESSAGES = 100;
@@ -130,6 +142,8 @@ export class ClaudeAdapter extends EventEmitter {
   private readonly dedupeTtlMs: number;
   private readonly monotonicNow: () => number;
   private deliveredMessageIds = new Map<string, number>();
+  /** False on frontends without a push channel (Kimi Code) — mailbox-only delivery. */
+  private readonly channelPushEnabled: boolean;
 
   // Latest budget snapshot, fed by bridge from DaemonStatus.budget broadcasts.
   private budgetSnapshot: BudgetSnapshot | null = null;
@@ -175,15 +189,19 @@ export class ClaudeAdapter extends EventEmitter {
       parsePositiveIntegerEnv("AGENTBRIDGE_BUDGET_FRESH_TTL_SEC", DEFAULT_BUDGET_FRESH_TTL_MS / 1000) * 1000,
     );
     this.wallNow = options.wallNow ?? (() => Date.now());
+    this.channelPushEnabled = options.channelPush ?? true;
 
     this.server = new Server(
       { name: "agentbridge", version: "0.1.0" },
       {
         capabilities: {
-          experimental: { "claude/channel": {} },
+          // The claude/channel capability is Claude Code-specific (Research
+          // Preview). Frontends without a channel (Kimi Code) must not declare
+          // it — they receive messages via the ACK mailbox + get_messages only.
+          ...(this.channelPushEnabled ? { experimental: { "claude/channel": {} } } : {}),
           tools: {},
         },
-        instructions: CLAUDE_INSTRUCTIONS,
+        instructions: options.instructions ?? CLAUDE_INSTRUCTIONS,
       },
     );
 
@@ -243,7 +261,11 @@ export class ClaudeAdapter extends EventEmitter {
     // variability of notifications/claude/channel). The push below is a
     // best-effort real-time optimization.
     this.queueFallbackMessage(message);
-    await this.pushViaChannel(message);
+    if (this.channelPushEnabled) {
+      await this.pushViaChannel(message);
+    } else {
+      this.log(`Channel push disabled on this frontend — message ${message.id} queued for get_messages pull`);
+    }
   }
 
   private async pushViaChannel(message: BridgeMessage) {

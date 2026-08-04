@@ -1,4 +1,5 @@
 import { findLatestClaudeSession } from "../claude-session";
+import { findLatestKimiSession } from "../kimi-session";
 import { parsePairFlag, resolvePairReadOnly } from "../pair-resolver";
 import { readUsableCurrentThread } from "../thread-state";
 
@@ -6,23 +7,26 @@ import { readUsableCurrentThread } from "../thread-state";
  * `abg resume` — one place to get back to where the pair left off.
  *
  *   abg resume          print the resume commands for this directory's last
- *                       Claude Code session and this pair's current Codex thread
+ *                       Claude/Kimi Code session and this pair's current Codex thread
  *   abg resume claude   resume the last Claude Code session here, directly
+ *   abg resume kimi     resume the last Kimi Code session here, directly
  *   abg resume codex    resume this pair's verified current Codex thread, directly
  *
  * Direct modes delegate to the regular launchers, so pair resolution, conflict
  * guards and the max-permission defaults all apply exactly as for
- * `abg claude` / `abg codex`.
+ * `abg claude` / `abg kimi` / `abg codex`.
  */
 export interface ResumeTargets {
   pairName: string;
   claudeSessionId: string | null;
+  kimiSessionId: string | null;
   codexThreadId: string | null;
 }
 
 export function resolveResumeTargets(opts: {
   pairFlag?: string;
   claudeHome?: string;
+  kimiHome?: string;
   env?: NodeJS.ProcessEnv;
 } = {}): ResumeTargets {
   // Pair resolution (resolvePairReadOnly) is hard-wired to process.cwd(), so
@@ -31,6 +35,7 @@ export function resolveResumeTargets(opts: {
   const cwd = process.cwd();
   const { pair } = resolvePairReadOnly(opts.pairFlag);
   const claude = findLatestClaudeSession(cwd, opts.claudeHome);
+  const kimi = findLatestKimiSession(cwd, opts.kimiHome);
   const codex = readUsableCurrentThread(
     {
       stateDir: pair.stateDir,
@@ -43,6 +48,7 @@ export function resolveResumeTargets(opts: {
   return {
     pairName: pair.name,
     claudeSessionId: claude?.sessionId ?? null,
+    kimiSessionId: kimi?.sessionId ?? null,
     codexThreadId: codex?.threadId ?? null,
   };
 }
@@ -79,12 +85,26 @@ export async function runResume(args: string[]) {
     return;
   }
 
+  if (target === "kimi") {
+    const session = findLatestKimiSession(process.cwd());
+    if (!session) {
+      console.error("[agentbridge] No Kimi Code session found for this directory.");
+      console.error("[agentbridge] Start one with: abg kimi");
+      process.exit(1);
+    }
+    console.error(`[agentbridge] Resuming Kimi Code session ${session.sessionId}`);
+    const { runKimi } = await import("./kimi");
+    await runKimi([...pairPrefix, "-S", session.sessionId, ...extra]);
+    return;
+  }
+
   if (target !== undefined) {
     console.error(`Error: unknown resume target "${target}".`);
     console.error("");
     console.error("Usage:");
     console.error("  abg resume           # print resume commands for this directory");
     console.error("  abg resume claude    # resume the last Claude Code session here");
+    console.error("  abg resume kimi      # resume the last Kimi Code session here");
     console.error("  abg resume codex     # resume this pair's current Codex thread");
     process.exit(1);
   }
@@ -98,6 +118,11 @@ export async function runResume(args: string[]) {
   } else {
     lines.push(`# no Claude Code session found for this directory (start one: abg ${pairArg}claude)`);
   }
+  if (targets.kimiSessionId) {
+    lines.push(`abg ${pairArg}kimi -S ${targets.kimiSessionId}`);
+  } else {
+    lines.push(`# no Kimi Code session found for this directory (start one: abg ${pairArg}kimi)`);
+  }
   if (targets.codexThreadId) {
     lines.push(`abg ${pairArg}codex resume ${targets.codexThreadId}`);
   } else {
@@ -105,10 +130,10 @@ export async function runResume(args: string[]) {
   }
   console.log(lines.join("\n"));
   console.error("");
-  console.error("Tip: `abg resume claude` / `abg resume codex` runs these directly.");
+  console.error("Tip: `abg resume claude` / `abg resume kimi` / `abg resume codex` runs these directly.");
   console.error("(max-permission flags are applied by default; opt out with --safe or AGENTBRIDGE_SAFE=1)");
 
-  if (!targets.claudeSessionId && !targets.codexThreadId) {
+  if (!targets.claudeSessionId && !targets.kimiSessionId && !targets.codexThreadId) {
     process.exit(1);
   }
 }
