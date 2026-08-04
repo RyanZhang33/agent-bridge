@@ -14229,8 +14229,11 @@ var CLAUDE_INSTRUCTIONS = [
   "",
   "## Waiting for a reply",
   "- When you send a message that expects a response, do NOT end your turn and go idle \u2014 an idle session only wakes on the next scheduled poll (up to 5 minutes later), which makes back-and-forth exchanges painfully slow.",
-  "- Instead, wait inside the turn: run `sleep 20` (Bash), then call get_messages; repeat this cycle until the reply arrives, then continue the exchange the same way.",
-  "- Give up after ~10 minutes of polling (roughly 20-30 cycles): end the turn with a one-line status. Delivery from then on is covered by the Stop hook (while you work) and the scheduled poll (while idle).",
+  "- Instead, wait inside the turn with get_messages, pacing the polls by expected response time:",
+  "  - Quick exchanges (letter relay, simple acks, one-step ops): call get_messages immediately, then `sleep 10` between polls.",
+  "  - Medium tasks (code review, single-file analysis, moderate research): `sleep 60` first, then +30s more per cycle.",
+  "  - Heavy tasks (multi-file deep research, repo analysis, complex architecture review): `sleep 90` first, then +60s more per cycle.",
+  "- Keep cycling until the reply arrives. Give up after ~10 minutes without a reply: end the turn with a one-line status \u2014 delivery from then on is covered by the Stop hook (while you work) and the scheduled poll (while idle).",
   "- Skip in-turn waiting when no reply is expected (final handoff, checkpoint, one-way notification).",
   "",
   "## Turn coordination",
@@ -14817,8 +14820,11 @@ var KIMI_INSTRUCTIONS = [
   "",
   "## Waiting for a reply",
   "- When you send a message that expects a response, do NOT end your turn and go idle \u2014 an idle session only wakes on the next scheduled poll (up to 5 minutes later), which makes back-and-forth exchanges painfully slow.",
-  "- Instead, wait inside the turn: run `sleep 20` (Bash), then call get_messages; repeat this cycle until the reply arrives, then continue the exchange the same way.",
-  "- Give up after ~10 minutes of polling (roughly 20-30 cycles): end the turn with a one-line status. Delivery from then on is covered by the Stop hook (while you work) and the scheduled poll (while idle).",
+  "- Instead, wait inside the turn with get_messages, pacing the polls by expected response time:",
+  "  - Quick exchanges (letter relay, simple acks, one-step ops): call get_messages immediately, then `sleep 10` between polls.",
+  "  - Medium tasks (code review, single-file analysis, moderate research): `sleep 60` first, then +30s more per cycle.",
+  "  - Heavy tasks (multi-file deep research, repo analysis, complex architecture review): `sleep 90` first, then +60s more per cycle.",
+  "- Keep cycling until the reply arrives. Give up after ~10 minutes without a reply: end the turn with a one-line status \u2014 delivery from then on is covered by the Stop hook (while you work) and the scheduled poll (while idle).",
   "- Skip in-turn waiting when no reply is expected (final handoff, checkpoint, one-way notification).",
   "",
   "## Turn coordination",
@@ -14864,10 +14870,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("7cbc1f3", "source"),
+  commit: defineString("55bb64b", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("ad22680dbd81", "source")
+  codeHash: defineString("5601586872ab", "source")
 });
 function sameRuntimeContract(a, b) {
   if (!a || !b)

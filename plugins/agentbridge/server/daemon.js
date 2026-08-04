@@ -30,10 +30,10 @@ function defineNumber(value, fallback) {
 }
 var BUILD_INFO = Object.freeze({
   version: defineString("0.1.30", "0.0.0-source"),
-  commit: defineString("7cbc1f3", "source"),
+  commit: defineString("55bb64b", "source"),
   bundle: defineBundle("plugin"),
   contractVersion: defineNumber(1, CONTRACT_VERSION),
-  codeHash: defineString("ad22680dbd81", "source")
+  codeHash: defineString("5601586872ab", "source")
 });
 function daemonStatusBuildInfo() {
   return { ...BUILD_INFO };
@@ -2601,6 +2601,7 @@ class PeerAdapter extends EventEmitter2 {
   peerName = "Peer";
   challengeInProgress = false;
   injectionSeq = 0;
+  incomingSeq = 0;
   buffered = [];
   logger;
   constructor(logFile) {
@@ -2738,7 +2739,11 @@ class PeerAdapter extends EventEmitter2 {
     this.emit("tuiDisconnected", ws.data.clientId);
   }
   handleIncoming(message) {
-    this.emit("agentMessage", { ...message, source: "codex" });
+    this.emit("agentMessage", {
+      ...message,
+      id: `relay_msg_${Date.now()}_${++this.incomingSeq}`,
+      source: "codex"
+    });
   }
   sendToPeer(message) {
     const ws = this.peer;
